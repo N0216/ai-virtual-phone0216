@@ -39,6 +39,16 @@ export function buildChatCompletionsUrl(baseUrl: string): string {
     return `${baseUrl.replace(/\/$/, "")}/chat/completions`;
 }
 
+/** Build the official OpenAI Responses endpoint without disturbing custom providers. */
+export function buildResponsesUrl(baseUrl: string): string {
+    const normalized = baseUrl.replace(/\/$/, "");
+    if (normalized.endsWith("/responses")) return normalized;
+    if (normalized.endsWith("/chat/completions")) {
+        return normalized.slice(0, -"/chat/completions".length) + "/responses";
+    }
+    return `${normalized}/responses`;
+}
+
 /**
  * GPT-5 models on the official OpenAI provider reject the legacy `max_tokens`
  * parameter on Chat Completions and require `max_completion_tokens` instead.

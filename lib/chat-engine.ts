@@ -1025,6 +1025,7 @@ type StreamToolCallDraft = {
     argsText: string;
     args?: Record<string, unknown>;
     thoughtSignature?: string;
+    providerResponseId?: string;
 };
 
 function mergeToolCallDelta(drafts: Map<number, StreamToolCallDraft>, delta: LlmToolCallDelta): void {
@@ -1035,6 +1036,7 @@ function mergeToolCallDelta(drafts: Map<number, StreamToolCallDraft>, delta: Llm
         argsText: current.argsText + (delta.argsText ?? ""),
         args: delta.args ?? (delta.argsText ? undefined : current.args),
         thoughtSignature: delta.thoughtSignature ?? current.thoughtSignature,
+        providerResponseId: delta.providerResponseId ?? current.providerResponseId,
     });
 }
 
@@ -1064,6 +1066,7 @@ function finalizeStreamToolCalls(drafts: Map<number, StreamToolCallDraft>): { ca
             args: args as Record<string, unknown>,
         };
         if (draft.thoughtSignature) call.thoughtSignature = draft.thoughtSignature;
+        if (draft.providerResponseId) call.providerResponseId = draft.providerResponseId;
         calls.push(call);
     }
     return { calls, truncatedNames };
@@ -1102,6 +1105,7 @@ export async function sendLLMToolStreamRequest(
     let reasoning = "";
     const contentStripper = createStreamingTimestampStripper();
     const toolDrafts = new Map<number, StreamToolCallDraft>();
+    let providerResponseId: string | undefined;
     const firedToolCallStarts = new Set<number>();
 
     try {
@@ -1127,6 +1131,7 @@ export async function sendLLMToolStreamRequest(
         const handleParsedDelta = async (data: unknown) => {
             {
                     const delta = parseProviderStreamDelta(request.providerKind, data);
+                    if (delta.providerResponseId) providerResponseId = delta.providerResponseId;
                     if (delta.reasoning) {
                         reasoning += delta.reasoning;
                         await callbacks?.onReasoningDelta?.(delta.reasoning);
@@ -1194,6 +1199,9 @@ export async function sendLLMToolStreamRequest(
             content: typeof m.content === "string" ? m.content : "[vision: 含图片的多模态消息]",
         }));
         const { calls: toolCalls, truncatedNames } = finalizeStreamToolCalls(toolDrafts);
+        if (providerResponseId) {
+            for (const call of toolCalls) call.providerResponseId = providerResponseId;
+        }
         const logEntry: DebugInfo = {
             id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
             characterName: meta?.characterName,

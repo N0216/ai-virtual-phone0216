@@ -2,6 +2,7 @@ import type { LLMContentPart, LLMMessage } from "./llm-prompt-assembler";
 import type { ApiConfig, PresetConfig } from "./settings-types";
 import {
     buildChatCompletionsUrl,
+    buildResponsesUrl,
     buildRequestHeaders,
     determineBaseUrl,
     isNativeAnthropicApi,
@@ -10,7 +11,7 @@ import {
     usesMaxCompletionTokens,
 } from "./api-helpers";
 
-export type LlmProviderKind = "openai-compatible" | "anthropic" | "gemini";
+export type LlmProviderKind = "openai-compatible" | "openai-responses" | "anthropic" | "gemini";
 export type NativeToolProtocol = "openai-compatible" | "anthropic" | "gemini";
 
 export type LlmToolDefinition = {
@@ -25,6 +26,8 @@ export type LlmToolCall = {
     args: Record<string, unknown>;
     /** Gemini 2.5+ multi-turn function calling 需要回传这个签名才能保持上下文一致性 */
     thoughtSignature?: string;
+    /** OpenAI Responses tool loops continue from this server-side response. */
+    providerResponseId?: string;
 };
 
 export type LlmRequestMessage =
@@ -56,6 +59,7 @@ export type LlmStreamDelta = {
     content: string;
     reasoning: string;
     toolCallDeltas?: LlmToolCallDelta[];
+    providerResponseId?: string;
 };
 
 export type LlmToolCallDelta = {
@@ -65,6 +69,7 @@ export type LlmToolCallDelta = {
     argsText?: string;
     args?: Record<string, unknown>;
     thoughtSignature?: string;
+    providerResponseId?: string;
 };
 
 type ProviderRequestOptions = {
@@ -258,6 +263,13 @@ export function buildProviderRequest(
     const guardedMessages = config.enableImageRecognition === true ? messages : stripVisionParts(messages);
     const providerMessages = ensureProviderHasUserMessage(normalizeNativeToolMessageAdjacency(guardedMessages));
 
+    // GPT-5 reasoning models cannot combine function tools with reasoning_effort
+    // on /chat/completions. Route only the official OpenAI GPT-5 tool path to
+    // /responses; ordinary OpenAI chat and every other provider stay unchanged.
+    if (options.tools?.length && usesMaxCompletionTokens(config)) {
+        return buildOpenAIResponsesRequest(config, preset, baseUrl, providerMessages, options);
+    }
+
     if (providerKind === "anthropic") {
         return buildAnthropicRequest(config, preset, baseUrl, providerMessages, options);
     }
@@ -283,6 +295,7 @@ export function buildProviderDebugMessages(
 export function parseProviderResponse(providerKind: LlmProviderKind, data: unknown): LlmParsedResponse {
     const result = providerKind === "anthropic" ? parseAnthropicResponse(data)
         : providerKind === "gemini" ? parseGeminiResponse(data)
+        : providerKind === "openai-responses" ? parseOpenAIResponsesResponse(data)
         : parseOpenAICompatibleResponse(data);
     result.content = stripHallucinatedTimestamps(result.content);
     return result;
@@ -291,6 +304,7 @@ export function parseProviderResponse(providerKind: LlmProviderKind, data: unkno
 export function parseProviderStreamDelta(providerKind: LlmProviderKind, data: unknown): LlmStreamDelta {
     if (providerKind === "anthropic") return parseAnthropicStreamDelta(data);
     if (providerKind === "gemini") return parseGeminiStreamDelta(data);
+    if (providerKind === "openai-responses") return parseOpenAIResponsesStreamDelta(data);
     return parseOpenAICompatibleStreamDelta(data);
 }
 
@@ -402,6 +416,7 @@ function debugPartsFromGeminiSystemInstruction(value: unknown): string {
 
 export function debugMessagesFromRequest(request: LlmRequestPayload): LlmDebugMessage[] {
     const body = request.body;
+    if (request.providerKind === "openai-responses") return request.messagesForLog;
     if (request.providerKind === "anthropic") {
         const messages: LlmDebugMessage[] = [];
         if (typeof body.system === "string" && body.system.trim()) {
@@ -548,6 +563,102 @@ function buildOpenAICompatibleRequest(
         headers: buildRequestHeaders(config, baseUrl),
         body,
         providerKind: "openai-compatible",
+        messagesForLog: messages.map(messageForLog),
+    };
+}
+
+function responsesContent(content: string | LLMContentPart[]): string | unknown[] {
+    if (typeof content === "string") return content;
+    return content.flatMap<unknown>((part) => part.type === "text"
+        ? (part.text ? [{ type: "input_text", text: part.text }] : [])
+        : [{ type: "input_image", image_url: part.image_url.url, detail: "auto" }]);
+}
+
+function responsesInputFromMessages(messages: LlmRequestMessage[], nativeToolItems = false): unknown[] {
+    return messages.flatMap<unknown>((message) => {
+        if (message.role === "tool") {
+            if (!nativeToolItems) {
+                return [{
+                    role: "user",
+                    content: `[tool_result name="${message.name}" tool_call_id="${message.toolCallId}"]\n${message.content}`,
+                }];
+            }
+            return [{
+                type: "function_call_output",
+                call_id: message.toolCallId,
+                output: message.content,
+            }];
+        }
+        if (message.role === "assistant" && message.toolCalls?.length) {
+            if (!nativeToolItems) {
+                const callText = message.toolCalls
+                    .map((call) => `[tool_call id="${call.id}" name="${call.name}"] ${JSON.stringify(call.args)}`)
+                    .join("\n");
+                return [{ role: "assistant", content: [message.content, callText].filter(Boolean).join("\n") }];
+            }
+            const items: unknown[] = [];
+            if (message.content) items.push({ role: "assistant", content: message.content });
+            for (const call of message.toolCalls) {
+                items.push({
+                    type: "function_call",
+                    call_id: call.id,
+                    name: call.name,
+                    arguments: JSON.stringify(call.args),
+                });
+            }
+            return items;
+        }
+        return [{ role: message.role, content: responsesContent(message.content) }];
+    });
+}
+
+function findResponsesContinuation(messages: LlmRequestMessage[]): { responseId: string; input: unknown[] } | null {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const message = messages[index];
+        if (message.role !== "assistant" || !message.toolCalls?.length) continue;
+        const responseId = message.toolCalls[0]?.providerResponseId;
+        if (!responseId || !message.toolCalls.every((call) => call.providerResponseId === responseId)) continue;
+        const following = messages.slice(index + 1);
+        // Only use previous_response_id for the immediate function-output turn.
+        // Completed historical tool exchanges are replayed normally instead.
+        if (following.length > 0 && following.every((item) => item.role === "tool")) {
+            return { responseId, input: responsesInputFromMessages(following, true) };
+        }
+    }
+    return null;
+}
+
+function buildOpenAIResponsesRequest(
+    config: ApiConfig,
+    preset: PresetConfig | null,
+    baseUrl: string,
+    messages: LlmRequestMessage[],
+    options: ProviderRequestOptions,
+): LlmRequestPayload {
+    const continuation = findResponsesContinuation(messages);
+    const maxOutputTokens = options.maxTokens && options.maxTokens > 0
+        ? Math.floor(options.maxTokens)
+        : preset?.openai_max_tokens && preset.openai_max_tokens > 0
+            ? Math.floor(preset.openai_max_tokens)
+            : undefined;
+    const body: Record<string, unknown> = {
+        model: config.defaultModel,
+        input: continuation?.input ?? responsesInputFromMessages(messages),
+        tools: (options.tools || []).map((tool) => ({
+            type: "function",
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.parameters,
+        })),
+    };
+    if (continuation) body.previous_response_id = continuation.responseId;
+    if (maxOutputTokens) body.max_output_tokens = maxOutputTokens;
+    if (options.stream) body.stream = true;
+    return {
+        url: buildResponsesUrl(baseUrl),
+        headers: buildRequestHeaders(config, baseUrl),
+        body,
+        providerKind: "openai-responses",
         messagesForLog: messages.map(messageForLog),
     };
 }
@@ -748,6 +859,49 @@ function parseOpenAICompatibleResponse(data: unknown): LlmParsedResponse {
     };
 }
 
+function responseTextItems(value: unknown): string {
+    if (!Array.isArray(value)) return "";
+    return value.map((part) => {
+        const item = asRecord(part);
+        return item.type === "output_text" || item.type === "refusal" ? String(item.text ?? item.refusal ?? "") : "";
+    }).join("");
+}
+
+function parseOpenAIResponsesResponse(data: unknown): LlmParsedResponse {
+    const d = asRecord(data);
+    const responseId = typeof d.id === "string" ? d.id : undefined;
+    const output = Array.isArray(d.output) ? d.output : [];
+    let content = "";
+    let reasoning = "";
+    const toolCalls: LlmToolCall[] = [];
+    for (const rawItem of output) {
+        const item = asRecord(rawItem);
+        if (item.type === "message") content += responseTextItems(item.content);
+        if (item.type === "reasoning") reasoning += responseTextItems(item.summary);
+        if (item.type === "function_call") {
+            toolCalls.push({
+                id: String(item.call_id ?? item.id ?? `tool_${Date.now()}_${toolCalls.length}`),
+                name: String(item.name ?? ""),
+                args: parseStrictArgs(String(item.arguments ?? "{}")),
+                providerResponseId: responseId,
+            });
+        }
+    }
+    if (!content && typeof d.output_text === "string") content = d.output_text;
+    const usage = asRecord(d.usage);
+    return {
+        content,
+        reasoning,
+        toolCalls,
+        usage: Object.keys(usage).length ? {
+            prompt_tokens: typeof usage.input_tokens === "number" ? usage.input_tokens : undefined,
+            completion_tokens: typeof usage.output_tokens === "number" ? usage.output_tokens : undefined,
+            total_tokens: typeof usage.total_tokens === "number" ? usage.total_tokens : undefined,
+        } : undefined,
+        raw: data,
+    };
+}
+
 function extractOpenAICompatibleText(data: {
     choices?: Array<{ message?: { content?: unknown }; text?: string }>;
     output?: { text?: string };
@@ -872,6 +1026,47 @@ function parseOpenAICompatibleStreamDelta(data: unknown): LlmStreamDelta {
         reasoning: String(delta?.reasoning_content ?? delta?.reasoning ?? delta?.thinking ?? ""),
         toolCallDeltas,
     };
+}
+
+function parseOpenAIResponsesStreamDelta(data: unknown): LlmStreamDelta {
+    const d = asRecord(data);
+    const type = String(d.type ?? "");
+    if (type === "response.created") {
+        const response = asRecord(d.response);
+        return { content: "", reasoning: "", providerResponseId: typeof response.id === "string" ? response.id : undefined };
+    }
+    if (type === "response.output_text.delta" || type === "response.refusal.delta") {
+        return { content: String(d.delta ?? ""), reasoning: "" };
+    }
+    if (type === "response.reasoning_summary_text.delta" || type === "response.reasoning_text.delta") {
+        return { content: "", reasoning: String(d.delta ?? "") };
+    }
+    if (type === "response.output_item.added") {
+        const item = asRecord(d.item);
+        if (item.type === "function_call") {
+            return {
+                content: "",
+                reasoning: "",
+                toolCallDeltas: [{
+                    index: typeof d.output_index === "number" ? d.output_index : 0,
+                    id: String(item.call_id ?? item.id ?? "") || undefined,
+                    name: typeof item.name === "string" ? item.name : undefined,
+                    argsText: typeof item.arguments === "string" ? item.arguments : undefined,
+                }],
+            };
+        }
+    }
+    if (type === "response.function_call_arguments.delta") {
+        return {
+            content: "",
+            reasoning: "",
+            toolCallDeltas: [{
+                index: typeof d.output_index === "number" ? d.output_index : 0,
+                argsText: String(d.delta ?? ""),
+            }],
+        };
+    }
+    return { content: "", reasoning: "" };
 }
 
 function parseAnthropicStreamDelta(data: unknown): LlmStreamDelta {
