@@ -40,6 +40,17 @@ export function buildChatCompletionsUrl(baseUrl: string): string {
 }
 
 /**
+ * GPT-5 models on the official OpenAI provider reject the legacy `max_tokens`
+ * parameter on Chat Completions and require `max_completion_tokens` instead.
+ * Other providers and model families deliberately keep their existing request
+ * format, even if a custom relay happens to expose a similarly named model.
+ */
+export function usesMaxCompletionTokens(config: Pick<ApiConfig, "provider" | "defaultModel">): boolean {
+    const normalized = config.defaultModel.trim().toLowerCase();
+    return config.provider === "OpenAI" && /^gpt-5(?:[.-]|$)/.test(normalized);
+}
+
+/**
  * Build request headers for an API config.
  * Handles provider-specific headers (OpenRouter, Anthropic, etc.)
  * and custom proxy/relay sites that use standard Bearer auth.
@@ -147,11 +158,17 @@ export async function simpleLLMCall(
         } else {
             // OpenAI-compatible (all others including proxies/relays/custom)
             fetchUrl = buildChatCompletionsUrl(baseUrl);
+            const tokenLimit = max_tokens
+                ? usesMaxCompletionTokens(config)
+                    ? { max_completion_tokens: max_tokens }
+                    : { max_tokens }
+                : {};
+            const sampling = usesMaxCompletionTokens(config) ? {} : { temperature };
             body = JSON.stringify({
                 model: config.defaultModel,
                 messages,
-                temperature,
-                ...(max_tokens ? { max_tokens } : {}),
+                ...sampling,
+                ...tokenLimit,
             });
         }
 

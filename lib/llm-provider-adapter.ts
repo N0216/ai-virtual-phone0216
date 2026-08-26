@@ -7,6 +7,7 @@ import {
     isNativeAnthropicApi,
     isNativeGoogleApi,
     stripHallucinatedTimestamps,
+    usesMaxCompletionTokens,
 } from "./api-helpers";
 
 export type LlmProviderKind = "openai-compatible" | "anthropic" | "gemini";
@@ -293,20 +294,26 @@ export function parseProviderStreamDelta(providerKind: LlmProviderKind, data: un
     return parseOpenAICompatibleStreamDelta(data);
 }
 
-function buildSamplingBody(preset: PresetConfig | null): Record<string, unknown> {
-    const body: Record<string, unknown> = {
+function buildSamplingBody(config: ApiConfig, preset: PresetConfig | null): Record<string, unknown> {
+    const useModernOpenAIParameters = usesMaxCompletionTokens(config);
+    const body: Record<string, unknown> = useModernOpenAIParameters ? {} : {
         temperature: preset?.temperature ?? 0.8,
         top_p: preset?.top_p ?? 1.0,
         frequency_penalty: preset?.frequency_penalty ?? 0,
         presence_penalty: preset?.presence_penalty ?? 0,
     };
-    if (preset?.openai_max_tokens && preset.openai_max_tokens > 0) body.max_tokens = preset.openai_max_tokens;
-    if (preset?.repetition_penalty !== undefined && preset.repetition_penalty !== 1) {
-        body.repetition_penalty = preset.repetition_penalty;
+    if (preset?.openai_max_tokens && preset.openai_max_tokens > 0) {
+        const key = usesMaxCompletionTokens(config) ? "max_completion_tokens" : "max_tokens";
+        body[key] = preset.openai_max_tokens;
     }
-    if (preset?.top_k && preset.top_k > 0) body.top_k = preset.top_k;
-    if (preset?.min_p && preset.min_p > 0) body.min_p = preset.min_p;
-    if (preset?.top_a && preset.top_a > 0) body.top_a = preset.top_a;
+    if (!useModernOpenAIParameters) {
+        if (preset?.repetition_penalty !== undefined && preset.repetition_penalty !== 1) {
+            body.repetition_penalty = preset.repetition_penalty;
+        }
+        if (preset?.top_k && preset.top_k > 0) body.top_k = preset.top_k;
+        if (preset?.min_p && preset.min_p > 0) body.min_p = preset.min_p;
+        if (preset?.top_a && preset.top_a > 0) body.top_a = preset.top_a;
+    }
     return body;
 }
 
@@ -519,9 +526,12 @@ function buildOpenAICompatibleRequest(
             }
             return { role: message.role, content: openAIContent(message.content) };
         }),
-        ...buildSamplingBody(preset),
+        ...buildSamplingBody(config, preset),
     };
-    if (options.maxTokens && options.maxTokens > 0) body.max_tokens = Math.floor(options.maxTokens);
+    if (options.maxTokens && options.maxTokens > 0) {
+        const key = usesMaxCompletionTokens(config) ? "max_completion_tokens" : "max_tokens";
+        body[key] = Math.floor(options.maxTokens);
+    }
     if (options.stream) body.stream = true;
     if (options.tools?.length) {
         body.tools = options.tools.map((tool) => ({
