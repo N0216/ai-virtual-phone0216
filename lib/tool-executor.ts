@@ -19,6 +19,8 @@ import {
     saveRestTools,
     saveRestToolPackages,
     expandToolNameMacros,
+    findEnabledToolForSchema,
+    resolvedToolPermissionKey,
     toolNameMatches,
 } from "./tool-storage";
 import { executeCustomAppToolCall } from "./custom-app-tool-runtime";
@@ -73,6 +75,9 @@ import {
 } from "./local-data-fs";
 import { makeTimedWakeId, saveTimedWakeSchedule } from "./timed-wake-storage";
 import { resolveUserIdentity } from "./settings-storage";
+import { loadApiConfigs } from "./settings-storage";
+import { getCharacterToolApiConfigId, type CharacterToolUsage } from "./character-tool-policy";
+import { simpleLLMCall } from "./api-helpers";
 import { attachAbortSignal, isAbortError, throwIfAborted } from "./abort-utils";
 import {
     deleteShortcutCommandMediaUrl,
@@ -95,6 +100,7 @@ export type ToolExecutionContext = {
     sessionId?: string;
     characterId?: string;
     sourceEngine?: "chat" | "group_chat" | "custom_app";
+    toolUsage?: CharacterToolUsage;
     signal?: AbortSignal;
     onShortcutCommandCreated?: (command: {
         id: string;
@@ -440,7 +446,49 @@ export function parseToolCalls(text: string): { cleanText: string; toolCalls: To
 
 export async function executeToolCalls(toolCalls: ToolCall[], context?: ToolExecutionContext): Promise<ToolResult[]> {
     throwIfAborted(context?.signal);
-    return Promise.all(toolCalls.map(call => executeSingleToolCall(call, context, { depth: 0 })));
+    return Promise.all(toolCalls.map(async call => {
+        const result = await executeSingleToolCall(call, context, { depth: 0 });
+        return compactToolResultWithAssignedModel(call, result, context);
+    }));
+}
+
+const TOOL_RESULT_COMPACTION_THRESHOLD = 700;
+
+async function compactToolResultWithAssignedModel(
+    call: ToolCall,
+    result: ToolResult,
+    context?: ToolExecutionContext,
+): Promise<ToolResult> {
+    if (!context?.characterId || context.appId !== "chat" || context.sourceEngine !== "chat") return result;
+    if (!result.success || !result.data || result.data.length < TOOL_RESULT_COMPACTION_THRESHOLD) return result;
+    if (result.pendingApproval || result.mediaAttachments?.length) return result;
+
+    const resolved = findEnabledToolForSchema(
+        call.name,
+        context.appId,
+        buildToolNameMacroContext(context),
+        context.characterId,
+        context.toolUsage ?? "chat",
+    );
+    if (!resolved) return result;
+    const apiConfigId = getCharacterToolApiConfigId(context.characterId, resolvedToolPermissionKey(resolved));
+    if (!apiConfigId) return result;
+    const apiConfig = loadApiConfigs().find(item => item.id === apiConfigId);
+    if (!apiConfig?.apiKey) return result;
+
+    const response = await simpleLLMCall(apiConfig, [
+        {
+            role: "system",
+            content: "你是工具结果整理器。只根据原始结果压缩，不得编造。保留结论、数字、时间、名称、ID、URL、失败项和必要上下文；删除重复与网页噪声。使用简洁中文，最多 1200 字。",
+        },
+        {
+            role: "user",
+            content: `工具：${call.name}\n参数：${JSON.stringify(call.args)}\n原始结果：\n${result.data}`,
+        },
+    ], { temperature: 0.1, max_tokens: 900, signal: context.signal });
+
+    if (!response.content?.trim()) return result;
+    return { ...result, data: response.content.trim() };
 }
 
 type ToolExecutionHint = {
@@ -469,6 +517,21 @@ async function executeSingleToolCall(
     hint: ToolExecutionHint,
 ): Promise<ToolResult> {
     throwIfAborted(context?.signal);
+    const nameMacroContext = buildToolNameMacroContext(context);
+    if (
+        hint.depth === 0
+        && context?.sourceEngine === "chat"
+        && context.appId === "chat"
+        && context.characterId
+        && !findEnabledToolForSchema(call.name, context.appId, nameMacroContext, context.characterId, context.toolUsage ?? "chat")
+    ) {
+        return {
+            name: call.name,
+            success: false,
+            error: "当前角色未获授权使用该工具",
+            userNotice: "这个角色没有使用该工具的权限",
+        };
+    }
     const preferredType = hint.toolType && hint.toolType !== "auto" && hint.toolType !== "script" ? hint.toolType : undefined;
     const restTools = loadRestTools();
     const restPackages = loadRestToolPackages();
@@ -479,7 +542,6 @@ async function executeSingleToolCall(
     const compositePackageIds = new Set(compositePackages.map(pkg => pkg.id));
     const enabledCompositePackageIds = new Set(compositePackages.filter(pkg => pkg.enabled).map(pkg => pkg.id));
     const mcpServers = loadMcpServers();
-    const nameMacroContext = buildToolNameMacroContext(context);
 
     const tryInternal = async () => {
         const internalResult = await executeInternalTool(call, context);

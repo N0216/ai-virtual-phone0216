@@ -20,6 +20,10 @@ import {
 } from "./builtin-phone-workflows";
 import { MacroEngine, postProcessTrim } from "./macro-engine";
 import { kvGet, kvSet, registerKvMigration } from "./kv-db";
+import {
+    isToolAllowedForCharacter,
+    type CharacterToolUsage,
+} from "./character-tool-policy";
 
 const REST_TOOLS_KEY = "ai_phone_rest_tools_v1";
 const REST_TOOL_PACKAGES_KEY = "ai_phone_rest_tool_packages_v1";
@@ -360,7 +364,37 @@ export type EnabledTool = {
     mcpTools?: McpDiscoveredTool[];
 };
 
-export function getEnabledTools(appId?: string): EnabledTool[] {
+export function enabledToolKey(tool: Pick<EnabledTool, "source" | "sourceId">): string {
+    return `${tool.source}:${tool.sourceId}`;
+}
+
+export function restToolPermissionKey(toolId: string): string {
+    return `rest:${toolId}`;
+}
+
+export function compositeToolPermissionKey(toolId: string): string {
+    return `composite:${toolId}`;
+}
+
+export function mcpToolPermissionKey(serverId: string, toolName: string): string {
+    return `mcp:${serverId}:${toolName}`;
+}
+
+export function customAppToolPermissionKey(appId: string, toolId: string): string {
+    return `custom_app:${appId}:${toolId}`;
+}
+
+export function resolvedToolPermissionKey(tool: EnabledTool): string {
+    if (tool.source === "mcp") return mcpToolPermissionKey(tool.sourceId, tool.name);
+    if (tool.source === "rest") return restToolPermissionKey(tool.sourceId);
+    if (tool.source === "composite") return compositeToolPermissionKey(tool.sourceId);
+    if (tool.source === "custom_app" && tool.customAppId && tool.customToolId) {
+        return customAppToolPermissionKey(tool.customAppId, tool.customToolId);
+    }
+    return enabledToolKey(tool);
+}
+
+function buildGloballyEnabledTools(appId?: string): EnabledTool[] {
     const tools: EnabledTool[] = [];
 
     const restTools = loadRestTools();
@@ -486,40 +520,92 @@ export function getEnabledTools(appId?: string): EnabledTool[] {
     return tools;
 }
 
-export function findEnabledToolForSchema(name: string, appId?: string, macroContext?: ToolNameMacroContext): EnabledTool | undefined {
-    const direct = getEnabledTools(appId).find(t => toolNameMatches(t.name, name, macroContext));
+function filterToolsForCharacter(
+    tools: EnabledTool[],
+    characterId: string,
+    usage: CharacterToolUsage,
+): EnabledTool[] {
+    const allowed = (key: string) => isToolAllowedForCharacter(characterId, key, usage);
+    const result: EnabledTool[] = [];
+    for (const tool of tools) {
+        if (tool.source === "rest_package") {
+            const children = (tool.restTools || []).filter(child => allowed(restToolPermissionKey(child.id)));
+            if (children.length > 0) result.push({ ...tool, restTools: children });
+            continue;
+        }
+        if (tool.source === "composite_package") {
+            const children = (tool.compositeTools || []).filter(child => allowed(compositeToolPermissionKey(child.id)));
+            if (children.length > 0) result.push({ ...tool, compositeTools: children });
+            continue;
+        }
+        if (tool.source === "mcp_server") {
+            const children = (tool.mcpTools || []).filter(child => allowed(mcpToolPermissionKey(tool.sourceId, child.name)));
+            if (children.length > 0) result.push({ ...tool, mcpTools: children });
+            continue;
+        }
+        if (tool.source === "custom_app_package") {
+            const children = (tool.customAppTools || []).filter(child => allowed(customAppToolPermissionKey(child.appId, child.id)));
+            if (children.length > 0) result.push({ ...tool, customAppTools: children });
+            continue;
+        }
+        if (allowed(enabledToolKey(tool))) result.push(tool);
+    }
+    return result;
+}
+
+export function getEnabledTools(
+    appId?: string,
+    characterId?: string,
+    usage: CharacterToolUsage = "chat",
+): EnabledTool[] {
+    const tools = buildGloballyEnabledTools(appId);
+    return characterId ? filterToolsForCharacter(tools, characterId, usage) : tools;
+}
+
+export function findEnabledToolForSchema(
+    name: string,
+    appId?: string,
+    macroContext?: ToolNameMacroContext,
+    characterId?: string,
+    usage: CharacterToolUsage = "chat",
+): EnabledTool | undefined {
+    const roleTools = getEnabledTools(appId, characterId, usage);
+    const direct = roleTools.find(t => toolNameMatches(t.name, name, macroContext));
     if (direct) return direct;
 
-    const compositePackages = loadCompositeToolPackages().filter(pkg => pkg.enabled);
-    const compositePackageIds = new Set(compositePackages.map(pkg => pkg.id));
-    for (const tool of loadCompositeTools()) {
-        if (!tool.enabled || !tool.packageId || !compositePackageIds.has(tool.packageId)) continue;
-        if (!toolNameMatches(tool.name, name, macroContext)) continue;
-        return {
-            name: tool.name,
-            description: tool.description,
-            parameterSchema: tool.parameterSchema,
-            source: "composite",
-            sourceId: tool.id,
-        };
-    }
-
-    const packages = loadRestToolPackages().filter(pkg => pkg.enabled);
-    const packageIds = new Set(packages.map(pkg => pkg.id));
-    for (const tool of loadRestTools()) {
-        if (!tool.enabled || !tool.packageId || !packageIds.has(tool.packageId)) continue;
-        if (!toolNameMatches(tool.name, name, macroContext)) continue;
-        return {
-            name: tool.name,
-            description: tool.description,
-            parameterSchema: tool.parameterSchema,
-            source: "rest",
-            sourceId: tool.id,
-        };
+    for (const group of roleTools) {
+        for (const tool of group.compositeTools || []) {
+            if (!toolNameMatches(tool.name, name, macroContext)) continue;
+            return { name: tool.name, description: tool.description, parameterSchema: tool.parameterSchema, source: "composite", sourceId: tool.id };
+        }
+        for (const tool of group.restTools || []) {
+            if (!toolNameMatches(tool.name, name, macroContext)) continue;
+            return { name: tool.name, description: tool.description, parameterSchema: tool.parameterSchema, source: "rest", sourceId: tool.id };
+        }
+        for (const tool of group.mcpTools || []) {
+            if (tool.name !== name) continue;
+            return { name: tool.name, description: tool.description || "MCP 工具", parameterSchema: JSON.stringify(tool.inputSchema || {}), source: "mcp", sourceId: group.sourceId };
+        }
+        for (const tool of group.customAppTools || []) {
+            if (tool.name !== name) continue;
+            return {
+                name: tool.name,
+                description: tool.description || `来自「${tool.appName}」的自定义 APP 工具`,
+                parameterSchema: JSON.stringify(tool.parameterSchema || { type: "object", properties: {} }),
+                usageGuide: tool.usageGuide,
+                source: "custom_app",
+                sourceId: `${tool.appId}:${tool.id}`,
+                customAppId: tool.appId,
+                customAppName: tool.appName,
+                customToolId: tool.id,
+            };
+        }
     }
 
     const internalSubTool = findEnabledInternalSubToolDefinition(name, appId);
     if (internalSubTool) {
+        const parentAllowed = roleTools.some(tool => tool.source === "internal" && tool.sourceId === internalSubTool.capability.id);
+        if (!parentAllowed) return undefined;
         return {
             name: internalSubTool.tool.name,
             description: internalSubTool.tool.description,
@@ -530,33 +616,6 @@ export function findEnabledToolForSchema(name: string, appId?: string, macroCont
         };
     }
 
-    for (const s of loadMcpServers()) {
-        if (!s.enabled || !s.discoveredTools) continue;
-        const tool = s.discoveredTools.find(t => t.name === name);
-        if (!tool) continue;
-        return {
-            name: tool.name,
-            description: tool.description || "",
-            parameterSchema: JSON.stringify(tool.inputSchema || {}),
-            source: "mcp",
-            sourceId: s.id,
-        };
-    }
-
-    for (const tool of loadCustomAppToolsForContext(appId)) {
-        if (!toolNameMatches(tool.name, name, macroContext)) continue;
-        return {
-            name: tool.name,
-            description: tool.description || `来自「${tool.appName}」的自定义 APP 工具`,
-            parameterSchema: JSON.stringify(tool.parameterSchema || { type: "object", properties: {} }),
-            usageGuide: tool.usageGuide,
-            source: "custom_app",
-            sourceId: `${tool.appId}:${tool.id}`,
-            customAppId: tool.appId,
-            customAppName: tool.appName,
-            customToolId: tool.id,
-        };
-    }
     return undefined;
 }
 

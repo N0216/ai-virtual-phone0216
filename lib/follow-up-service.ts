@@ -23,8 +23,10 @@ import { armFollowUpBailout, armIdleReconnectBailout, cancelBailoutKey, cancelBa
 import { isWithinPushQuietHours } from "./push-client";
 import {
     IDLE_RECONNECT_MAX_CONSECUTIVE,
+    canRunIdleReconnect,
+    getEffectiveIdleReconnectConsecutive,
     loadIdleReconnectRules,
-    markIdleReconnectFired,
+    markIdleReconnectChecked,
     resetIdleReconnectForSession,
     suppressIdleReconnectUntil,
     type IdleReconnectRule,
@@ -552,13 +554,15 @@ function pollIdleReconnect(now: number) {
         if (!lastUser) continue;
         const lastUserAt = new Date(lastUser.createdAt).getTime();
 
-        const effectiveConsecutive = rule.lastFiredAt && rule.lastFiredAt > lastUserAt ? rule.consecutiveCount : 0;
+        const effectiveConsecutive = getEffectiveIdleReconnectConsecutive(rule, lastUserAt, now);
         if (effectiveConsecutive >= IDLE_RECONNECT_MAX_CONSECUTIVE) continue;
+        const budget = canRunIdleReconnect(rule, now);
+        if (!budget.ok) continue;
 
         const intervalMs = Math.max(1, rule.intervalMinutes) * 60_000;
         const nextDueAt = Math.max(
             lastUserAt + intervalMs,
-            rule.lastFiredAt ? rule.lastFiredAt + intervalMs : 0,
+            rule.lastCheckedAt ? rule.lastCheckedAt + intervalMs : 0,
             rule.suppressedUntil ?? 0,
         );
         if (now < nextDueAt) continue;
@@ -591,6 +595,8 @@ async function fireIdleReconnect(rule: IdleReconnectRule, lastUserAt: number) {
             {
                 appTags: ["chat", "text", "idle_wake"],
                 timedWakeElapsedMinutes: elapsedMinutes,
+                apiConfigIdOverride: rule.wakeApiConfigId,
+                forceEnableTools: true,
             },
         );
 
@@ -609,7 +615,11 @@ async function fireIdleReconnect(rule: IdleReconnectRule, lastUserAt: number) {
             undefined,
             latestMessages,
         );
-        markIdleReconnectFired(rule.id, Date.now());
+        const promptChars = latestMessages.slice(-40).reduce((sum, message) => sum + (message.content?.length || 0), 0);
+        const outputChars = rounds.reduce((sum, round) => sum + round.text.length + (round.reasoningText?.length || 0), 0);
+        // 额外预留角色卡、世界书、长期记忆与工具说明的系统提示开销，宁可早停也不低估。
+        const estimatedTokens = 2_000 + Math.max(1, Math.ceil((promptChars + outputChars) / 3));
+        markIdleReconnectChecked(rule.id, Date.now(), hasVisible, estimatedTokens);
         if (hasVisible) scheduleFollowUp(session.id, 0, stateValues);
         window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: session.id } }));
 
@@ -618,6 +628,7 @@ async function fireIdleReconnect(rule: IdleReconnectRule, lastUserAt: number) {
         if (refreshed) void armIdleReconnectBailout(refreshed);
     } catch (error: unknown) {
         console.error("[IdleReconnect] Error:", error);
+        markIdleReconnectChecked(rule.id, Date.now(), false, 0);
         window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: rule.sessionId } }));
     } finally {
         backgroundGeneratingSessions.delete(rule.sessionId);

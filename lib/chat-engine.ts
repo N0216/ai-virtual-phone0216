@@ -85,6 +85,7 @@ import {
 import { parseOfflineResponse, type ParsedOfflineResponse } from "./chat-offline-storage";
 import { throwIfAborted } from "./abort-utils";
 import { armShortcutContinuation, type ShortcutContinuationHandle, type ShortcutContinuationStyle } from "./shortcut-continuation-client";
+import type { CharacterToolUsage } from "./character-tool-policy";
 
 
 
@@ -381,7 +382,20 @@ type ChatPromptBuildOptions = {
     activateAllWorldBooks?: boolean;
     toolsAllowed?: boolean;
     forceEnableTools?: boolean;
+    /** Use a cheaper/dedicated model for background wake-ups without changing the role binding. */
+    apiConfigIdOverride?: string;
 };
+
+function resolveCharacterToolUsage(appTags?: string[]): CharacterToolUsage {
+    const tags = new Set(appTags || []);
+    return tags.has("idle_wake")
+        || tags.has("timed_wake")
+        || tags.has("user_timed_wake")
+        || tags.has("followup")
+        || tags.has("period_care")
+        ? "auto_wake"
+        : "chat";
+}
 
 function matchesPromptProfileRef(prompt: { identifier: string; name?: string }, refs: Set<string>): boolean {
     return refs.has(prompt.identifier) || Boolean(prompt.name && refs.has(prompt.name));
@@ -1809,7 +1823,8 @@ export async function buildChatPromptMessages(
     }
 
     const apiConfigs = loadApiConfigs();
-    const config = apiConfigs.find(c => c.id === activeSlot.apiConfigId);
+    const effectiveApiConfigId = options?.apiConfigIdOverride || activeSlot.apiConfigId;
+    const config = apiConfigs.find(c => c.id === effectiveApiConfigId);
     if (!config) throw new ChatEngineError(`API Configuration not found for ${character.name}.`);
 
     const presets = loadPresets();
@@ -1858,7 +1873,8 @@ export async function buildChatPromptMessages(
     const isOfflineMode = options?.appTags?.includes("offline") === true;
     const effectiveAppTags = mergeAppTags(options?.appTags, promptProfile?.appTags, resolvedAppId);
     const toolsAllowed = options?.toolsAllowed !== false && !isOfflineMode;
-    const enabledTools = toolsAllowed ? getEnabledTools(resolvedAppId) : [];
+    const toolUsage = resolveCharacterToolUsage(options?.appTags);
+    const enabledTools = toolsAllowed ? getEnabledTools(resolvedAppId, character.id, toolUsage) : [];
     const toolsEnabled = enabledTools.length > 0
         && (options?.forceEnableTools === true || presetIncludesToolsMacro(preset, resolvedAppId, effectiveAppTags));
     const usesNativeActions = Boolean(toolsEnabled && nativeToolProtocolForConfig(config));
@@ -2063,7 +2079,8 @@ async function generateNativeChatCompletion(
     },
 ): Promise<ChatCompletionResult> {
     const { session, llmMessages, character, config, preset, regexes, userIdentity, options, callbacks, bailoutRef } = params;
-    const enabledTools = getEnabledTools(options?.appId ?? "chat");
+    const toolUsage = resolveCharacterToolUsage(options?.appTags);
+    const enabledTools = getEnabledTools(options?.appId ?? "chat", character.id, toolUsage);
     const requestAppTags = mergeAppTags(options?.appTags, options?.promptProfile?.appTags, options?.appId ?? "chat");
     const persistedSession = loadChatSessions().find(item => item.id === session.id);
     let expandedSourceIds = normalizeNativeExpandedToolSourceIds(
@@ -2164,6 +2181,7 @@ async function generateNativeChatCompletion(
                     sessionId: session.id,
                     characterId: session.contactId,
                     sourceEngine: "chat",
+                    toolUsage,
                     signal: options?.signal,
                     onShortcutCommandCreated: onlyNativeCall ? async command => {
                         const resultMarker = `__FLOAT_SHORTCUT_RESULT_${command.id}__`;
@@ -2457,7 +2475,8 @@ async function generateChatCompletionCore(
         }).catch(() => undefined);
     }
 
-    if (toolsEnabled && nativeToolProtocolForConfig(config) && getEnabledTools(options?.appId ?? "chat").length > 0) {
+    const toolUsage = resolveCharacterToolUsage(options?.appTags);
+    if (toolsEnabled && nativeToolProtocolForConfig(config) && getEnabledTools(options?.appId ?? "chat", character.id, toolUsage).length > 0) {
         return generateNativeChatCompletion({
             session,
             llmMessages,
@@ -2555,7 +2574,7 @@ async function generateChatCompletionCore(
                 const tool = findEnabledToolForSchema(fetch.name, options?.appId ?? "chat", {
                     characterName: character.name,
                     userName: userIdentity?.name ?? "用户",
-                });
+                }, character.id, toolUsage);
                 const schemaContent = tool
                     ? formatToolSchema(tool, {
                         characterName: character.name,
@@ -2589,6 +2608,7 @@ async function generateChatCompletionCore(
                     sessionId: session.id,
                     characterId: session.contactId,
                     sourceEngine: "chat",
+                    toolUsage,
                     signal: options?.signal,
                     onShortcutCommandCreated: onlyToolCall ? async command => {
                         const resultMarker = `__FLOAT_SHORTCUT_RESULT_${command.id}__`;
@@ -2829,7 +2849,9 @@ export async function previewPromptRequestSnapshot(
 
     const { llmMessages, character, config, preset, userIdentity, toolsEnabled } = await buildChatPromptMessages(session, effectiveHistory, options);
     const requestMessages = toLlmRequestMessages(llmMessages);
-    const enabledTools = toolsEnabled ? getEnabledTools(options?.appId ?? "chat") : [];
+    const enabledTools = toolsEnabled
+        ? getEnabledTools(options?.appId ?? "chat", character.id, resolveCharacterToolUsage(options?.appTags))
+        : [];
     const meta = { characterName: character.name, userName: userIdentity?.name };
 
     if (nativeToolProtocolForConfig(config) && enabledTools.length > 0) {

@@ -1,6 +1,7 @@
 import type { Character, CanvasBgItem } from "./character-types";
 import { normalizeTimeZone } from "./character-time";
 import { kvGet, kvSet, registerKvMigration } from "./kv-db";
+import { initializeNewCharacterToolPolicy } from "./character-tool-policy";
 
 /** Thrown when a character card contains fields unsupported by the current schema */
 export const CHAR_BLOCKED_FIELDS = "CHAR_BLOCKED_FIELDS";
@@ -125,7 +126,7 @@ export function createCharacter(
   data: Omit<Character, "id" | "createdAt" | "updatedAt" | "wechatID"> & { wechatID?: string }
 ): Character {
   const now = new Date().toISOString();
-  return {
+  const character: Character = {
     ...data,
     id: `char_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
     wechatID: data.wechatID || generateWechatID(),
@@ -133,6 +134,8 @@ export function createCharacter(
     createdAt: now,
     updatedAt: now,
   };
+  initializeNewCharacterToolPolicy(character.id);
+  return character;
 }
 
 // ── JSON import/export ───────────────────────────────

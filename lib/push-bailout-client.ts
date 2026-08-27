@@ -24,6 +24,10 @@ import {
 import { loadTimedWakeSchedules, type TimedWakeSchedule } from "./timed-wake-storage";
 import {
     IDLE_RECONNECT_MAX_CONSECUTIVE,
+    canRunIdleReconnect,
+    getEffectiveIdleReconnectConsecutive,
+    getIdleReconnectDailyUsage,
+    getIdleReconnectLimits,
     loadIdleReconnectRules,
     type IdleReconnectRule,
 } from "./idle-reconnect-storage";
@@ -392,17 +396,22 @@ export async function armIdleReconnectBailout(rule: IdleReconnectRule): Promise<
         if (!lastUser) return { ok: false, reason: "这个会话还没有你的消息，无法计算沉默时间" };
         const lastUserAt = new Date(lastUser.createdAt).getTime();
 
-        const effectiveConsecutive = rule.lastFiredAt && rule.lastFiredAt > lastUserAt ? rule.consecutiveCount : 0;
+        const effectiveConsecutive = getEffectiveIdleReconnectConsecutive(rule, lastUserAt);
         if (effectiveConsecutive >= IDLE_RECONNECT_MAX_CONSECUTIVE) {
             // 不再挂新单，把该规则的存量排队任务清干净
             await cancelBailoutPrefix(`idle:${rule.id}:`);
             return { ok: false, reason: "已达到连续主动联系上限" };
         }
+        const budget = canRunIdleReconnect(rule);
+        if (!budget.ok) {
+            await cancelBailoutPrefix(`idle:${rule.id}:`);
+            return { ok: false, reason: budget.reason || "今日后台预算已达上限" };
+        }
 
         const intervalMs = Math.max(1, rule.intervalMinutes) * 60_000;
         const nextDueAt = Math.max(
             lastUserAt + intervalMs,
-            rule.lastFiredAt ? rule.lastFiredAt + intervalMs : 0,
+            rule.lastCheckedAt ? rule.lastCheckedAt + intervalMs : 0,
             rule.suppressedUntil ?? 0,
         );
         const fireAt = Math.max(nextDueAt, Date.now() + 30_000);
@@ -416,7 +425,12 @@ export async function armIdleReconnectBailout(rule: IdleReconnectRule): Promise<
         const { llmMessages, character, config, preset, regexes, userIdentity } = await buildChatPromptMessages(
             session,
             history,
-            { appTags: ["chat", "text", "idle_wake"], timedWakeElapsedMinutes: elapsedMinutes },
+            {
+                appTags: ["chat", "text", "idle_wake"],
+                timedWakeElapsedMinutes: elapsedMinutes,
+                apiConfigIdOverride: rule.wakeApiConfigId,
+                forceEnableTools: true,
+            },
         );
         maybeAppendCallInvite(llmMessages, rule.characterId);
         maybeAppendShortcutCapability(llmMessages);
@@ -426,7 +440,18 @@ export async function armIdleReconnectBailout(rule: IdleReconnectRule): Promise<
             const req = buildProviderRequest(config, preset, toLlmRequestMessages(messages));
             return { url: req.url, headers: req.headers, body: req.body, providerKind: req.providerKind };
         });
-        const remaining = IDLE_RECONNECT_MAX_CONSECUTIVE - effectiveConsecutive - 1;
+        const usage = getIdleReconnectDailyUsage(rule);
+        const limits = getIdleReconnectLimits(rule);
+        const remainingByChecks = limits.maxChecksPerDay - usage.checks - 1;
+        const remainingByMessages = limits.maxMessagesPerDay - usage.messages - 1;
+        // 云端拿不到供应商的精确计费 Token，按每次约 3000 Token 保守限制续排。
+        const remainingByTokens = Math.floor((limits.dailyTokenBudget - usage.estimatedTokens) / 3000) - 1;
+        const remaining = Math.max(0, Math.min(
+            IDLE_RECONNECT_MAX_CONSECUTIVE - effectiveConsecutive - 1,
+            remainingByChecks,
+            remainingByMessages,
+            remainingByTokens,
+        ));
         // 先挂后清：POST 本身按同键先删后插（幂等覆盖），挂稳后再清理同前缀的其他旧键
         //（旧连发序号、服务端续排的 "+" 后缀键）。之前是先清后挂，切后台/杀进程
         // 发生在清理和重挂之间会把预约整个删空——服务端从此无单可执行。

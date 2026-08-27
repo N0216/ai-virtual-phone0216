@@ -9,6 +9,16 @@ registerKvMigration(IDLE_RECONNECT_RULES_KEY);
 
 /** 连发上限：用户不回复时最多主动发这么多次，回复后清零 */
 export const IDLE_RECONNECT_MAX_CONSECUTIVE = 3;
+export const DEFAULT_IDLE_RECONNECT_MAX_CHECKS_PER_DAY = 8;
+export const DEFAULT_IDLE_RECONNECT_MAX_MESSAGES_PER_DAY = 3;
+export const DEFAULT_IDLE_RECONNECT_DAILY_TOKEN_BUDGET = 30_000;
+
+export type IdleReconnectDailyUsage = {
+    dayKey: string;
+    checks: number;
+    messages: number;
+    estimatedTokens: number;
+};
 
 export type IdleReconnectRule = {
     id: string;
@@ -18,10 +28,18 @@ export type IdleReconnectRule = {
     intervalMinutes: number;
     /** 用户附加意图（可空） */
     intent: string;
+    /** 留空时沿用该角色聊天绑定的主模型。 */
+    wakeApiConfigId?: string;
+    maxChecksPerDay?: number;
+    maxMessagesPerDay?: number;
+    dailyTokenBudget?: number;
+    dailyUsage?: IdleReconnectDailyUsage;
     /** 自上次用户消息以来已连发次数 */
     consecutiveCount: number;
     /** 上次触发时刻（毫秒） */
     lastFiredAt?: number;
+    /** 上次完成醒来检查的时刻；静默检查也会记录，防止立即重复消耗。 */
+    lastCheckedAt?: number;
     /** 当前这次主动生成被用户停止后，短时间内不再重试 */
     suppressedUntil?: number;
     createdAt: number;
@@ -37,6 +55,44 @@ function isRule(value: unknown): value is IdleReconnectRule {
         && typeof item.intent === "string"
         && typeof item.consecutiveCount === "number"
         && typeof item.createdAt === "number";
+}
+
+function localDayKey(atMs: number): string {
+    const date = new Date(atMs);
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+export function getIdleReconnectDailyUsage(rule: IdleReconnectRule, atMs = Date.now()): IdleReconnectDailyUsage {
+    const dayKey = localDayKey(atMs);
+    if (rule.dailyUsage?.dayKey === dayKey) return rule.dailyUsage;
+    return { dayKey, checks: 0, messages: 0, estimatedTokens: 0 };
+}
+
+export function getIdleReconnectLimits(rule: IdleReconnectRule) {
+    return {
+        maxChecksPerDay: Math.max(1, rule.maxChecksPerDay ?? DEFAULT_IDLE_RECONNECT_MAX_CHECKS_PER_DAY),
+        maxMessagesPerDay: Math.max(1, rule.maxMessagesPerDay ?? DEFAULT_IDLE_RECONNECT_MAX_MESSAGES_PER_DAY),
+        dailyTokenBudget: Math.max(1_000, rule.dailyTokenBudget ?? DEFAULT_IDLE_RECONNECT_DAILY_TOKEN_BUDGET),
+    };
+}
+
+/** 连发限制按当天计算；隔天可以重新醒来，不会因为前一天没回复永久停住。 */
+export function getEffectiveIdleReconnectConsecutive(
+    rule: IdleReconnectRule,
+    lastUserAt: number,
+    atMs = Date.now(),
+): number {
+    if (!rule.lastFiredAt || rule.lastFiredAt <= lastUserAt) return 0;
+    return localDayKey(rule.lastFiredAt) === localDayKey(atMs) ? rule.consecutiveCount : 0;
+}
+
+export function canRunIdleReconnect(rule: IdleReconnectRule, atMs = Date.now()): { ok: boolean; reason?: string } {
+    const usage = getIdleReconnectDailyUsage(rule, atMs);
+    const limits = getIdleReconnectLimits(rule);
+    if (usage.checks >= limits.maxChecksPerDay) return { ok: false, reason: "今日醒来检查次数已达上限" };
+    if (usage.messages >= limits.maxMessagesPerDay) return { ok: false, reason: "今日主动消息次数已达上限" };
+    if (usage.estimatedTokens >= limits.dailyTokenBudget) return { ok: false, reason: "今日后台 Token 预算已达上限" };
+    return { ok: true };
 }
 
 export function loadIdleReconnectRules(): IdleReconnectRule[] {
@@ -67,14 +123,37 @@ export function removeIdleReconnectRule(id: string): void {
 
 /** 记一次触发（本地触发或服务端触发回端合并时都调用）。 */
 export function markIdleReconnectFired(id: string, firedAtMs: number): void {
+    markIdleReconnectChecked(id, firedAtMs, true, 0);
+}
+
+/** 记录一次真实检查。只有确实产生可见消息时才计入连发与消息上限。 */
+export function markIdleReconnectChecked(
+    id: string,
+    checkedAtMs: number,
+    hasVisible: boolean,
+    estimatedTokens: number,
+): void {
     const rules = loadIdleReconnectRules();
     const rule = rules.find(item => item.id === id);
     if (!rule) return;
-    if (!rule.lastFiredAt || firedAtMs > rule.lastFiredAt) {
-        rule.lastFiredAt = firedAtMs;
-        rule.consecutiveCount = Math.min(IDLE_RECONNECT_MAX_CONSECUTIVE, rule.consecutiveCount + 1);
-        saveRules(rules);
+    if (!rule.lastCheckedAt || checkedAtMs > rule.lastCheckedAt) {
+        rule.lastCheckedAt = checkedAtMs;
+        const usage = getIdleReconnectDailyUsage(rule, checkedAtMs);
+        rule.dailyUsage = {
+            ...usage,
+            checks: usage.checks + 1,
+            messages: usage.messages + (hasVisible ? 1 : 0),
+            estimatedTokens: usage.estimatedTokens + Math.max(0, Math.round(estimatedTokens)),
+        };
     }
+    if (hasVisible && (!rule.lastFiredAt || checkedAtMs > rule.lastFiredAt)) {
+        const startsNewDay = !rule.lastFiredAt || localDayKey(rule.lastFiredAt) !== localDayKey(checkedAtMs);
+        rule.lastFiredAt = checkedAtMs;
+        rule.consecutiveCount = startsNewDay
+            ? 1
+            : Math.min(IDLE_RECONNECT_MAX_CONSECUTIVE, rule.consecutiveCount + 1);
+    }
+    saveRules(rules);
 }
 
 /** 用户停止了当前这次冷场生成：不计入连发，只推迟下一次尝试。 */
