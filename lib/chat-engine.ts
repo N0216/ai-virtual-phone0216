@@ -86,6 +86,12 @@ import { parseOfflineResponse, type ParsedOfflineResponse } from "./chat-offline
 import { throwIfAborted } from "./abort-utils";
 import { armShortcutContinuation, type ShortcutContinuationHandle, type ShortcutContinuationStyle } from "./shortcut-continuation-client";
 import type { CharacterToolUsage } from "./character-tool-policy";
+import {
+    canStartAutoWakeModelCall,
+    estimateUsageFromText,
+    recordModelUsage,
+    usageCategoryForChatRequest,
+} from "./model-usage";
 
 
 
@@ -395,6 +401,31 @@ function resolveCharacterToolUsage(appTags?: string[]): CharacterToolUsage {
         || tags.has("period_care")
         ? "auto_wake"
         : "chat";
+}
+
+function ensureChatModelUsageAllowed(appId: string | undefined, appTags: string[] | undefined): void {
+    if (usageCategoryForChatRequest(appId ?? "chat", appTags) !== "auto_wake") return;
+    const allowed = canStartAutoWakeModelCall();
+    if (!allowed.ok) throw new ChatEngineError(`AUTO_WAKE_USAGE_LIMIT:${allowed.reason || "今日自动醒来用量已达上限"}`);
+}
+
+function recordChatModelUsage(input: {
+    appId?: string;
+    appTags?: string[];
+    model: string;
+    requestChars: number;
+    responseChars: number;
+    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+}): void {
+    const estimated = estimateUsageFromText(input.requestChars, input.responseChars);
+    recordModelUsage({
+        category: usageCategoryForChatRequest(input.appId ?? "chat", input.appTags),
+        model: input.model,
+        promptTokens: input.usage?.prompt_tokens ?? estimated.promptTokens,
+        completionTokens: input.usage?.completion_tokens ?? estimated.completionTokens,
+        totalTokens: input.usage?.total_tokens ?? estimated.totalTokens,
+        estimated: !input.usage?.total_tokens,
+    });
 }
 
 function matchesPromptProfileRef(prompt: { identifier: string; name?: string }, refs: Set<string>): boolean {
@@ -812,6 +843,7 @@ export async function sendLLMStreamRequest(
     const requestMessages = toLlmRequestMessages(afterPlugins.messages);
     const request = buildProviderRequest(config, effectivePreset, requestMessages, { stream: true });
     const requestBodyJson = JSON.stringify(request.body);
+    ensureChatModelUsageAllowed(options?.appId, options?.appTags);
     const llmAbort = new AbortController();
     const llmTimeout = setTimeout(() => llmAbort.abort(), 500_000);
     const detachExternalAbort = attachExternalAbort(llmAbort, options?.signal);
@@ -852,6 +884,13 @@ export async function sendLLMStreamRequest(
         logs.push(logEntry);
         while (logs.length > MAX_API_LOGS) logs.shift();
         _saveLogs(logs);
+        recordChatModelUsage({
+            appId: options?.appId,
+            appTags: options?.appTags,
+            model: config.defaultModel,
+            requestChars: requestBodyJson.length,
+            responseChars: rawOutput.length,
+        });
 
         if (!options?.skipOutputRegex) {
             const macroEngine = new MacroEngine(meta?.characterName ?? "", meta?.userName ?? "用户");
@@ -928,6 +967,7 @@ export async function sendLLMRequest(
 
     console.log("[ChatEngine] Message roles:", request.messagesForLog.map((m, i) => `${i}:${m.role}`).join(" → "));
     console.log("[ChatEngine] Request:", requestDebugInfo);
+    ensureChatModelUsageAllowed(options?.appId, options?.appTags);
 
     const llmAbort = new AbortController();
     const llmTimeout = setTimeout(() => llmAbort.abort(), 500_000);
@@ -995,6 +1035,14 @@ export async function sendLLMRequest(
         logs.push(logEntry);
         while (logs.length > MAX_API_LOGS) logs.shift();
         _saveLogs(logs);
+        recordChatModelUsage({
+            appId: options?.appId,
+            appTags: options?.appTags,
+            model: config.defaultModel,
+            requestChars: requestBodyJson.length,
+            responseChars: rawOutput.length,
+            usage: parsed.usage,
+        });
 
         if (options?.skipOutputRegex) {
             return rawOutput;
@@ -1111,6 +1159,7 @@ export async function sendLLMToolStreamRequest(
     const request = buildProviderRequest(config, effectivePreset, afterPlugins.messages, { tools, stream: true, maxTokens: options?.maxTokens });
     publishDebugPromptSnapshot({ request, config, preset: effectivePreset, meta, options, requestKind: "native-tools-stream", tools });
     const requestBodyJson = JSON.stringify(request.body);
+    ensureChatModelUsageAllowed(options?.appId, options?.appTags);
     const llmAbort = new AbortController();
     const llmTimeout = setTimeout(() => llmAbort.abort(), 500_000);
     const detachExternalAbort = attachExternalAbort(llmAbort, options?.signal);
@@ -1228,6 +1277,13 @@ export async function sendLLMToolStreamRequest(
         logs.push(logEntry);
         while (logs.length > MAX_API_LOGS) logs.shift();
         _saveLogs(logs);
+        recordChatModelUsage({
+            appId: options?.appId,
+            appTags: options?.appTags,
+            model: config.defaultModel,
+            requestChars: requestBodyJson.length,
+            responseChars: content.length + reasoning.length + rawResponse.length,
+        });
 
         if (!content && toolCalls.length === 0 && truncatedNames.length === 0) {
             throw new ChatEngineError("原生动作流式响应没有解析到文本或动作。");
@@ -1279,6 +1335,7 @@ export async function sendLLMToolRequest(
     const request = buildProviderRequest(config, effectivePreset, afterPlugins.messages, { tools });
     publishDebugPromptSnapshot({ request, config, preset: effectivePreset, meta, options, requestKind: "native-tools", tools });
     const requestBodyJson = JSON.stringify(request.body);
+    ensureChatModelUsageAllowed(options?.appId, options?.appTags);
     const llmAbort = new AbortController();
     const llmTimeout = setTimeout(() => llmAbort.abort(), 500_000);
     const detachExternalAbort = attachExternalAbort(llmAbort, options?.signal);
@@ -1343,6 +1400,14 @@ export async function sendLLMToolRequest(
         logs.push(logEntry);
         while (logs.length > MAX_API_LOGS) logs.shift();
         _saveLogs(logs);
+        recordChatModelUsage({
+            appId: options?.appId,
+            appTags: options?.appTags,
+            model: config.defaultModel,
+            requestChars: requestBodyJson.length,
+            responseChars: rawResponse.length,
+            usage: parsed.usage,
+        });
 
         if (!options?.skipOutputRegex && rawOutput) {
             const macroEngine = new MacroEngine(meta?.characterName ?? "", meta?.userName ?? "用户");

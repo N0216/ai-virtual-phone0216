@@ -2,6 +2,7 @@
 
 import type { VoiceApiConfig, ContentAppId } from "./settings-types";
 import { loadVoiceConfigs, loadBindingConfig, resolveBinding } from "./settings-storage";
+import { recordModelUsage } from "./model-usage";
 
 export type VoiceApiConfigResolved = VoiceApiConfig;
 
@@ -36,11 +37,15 @@ export async function synthesizeSpeech(
     const provider = voiceConfig.provider;
 
     if (provider === "Minimax") {
-        return synthesizeMinimax(text, voiceConfig, options?.emotion);
+        const audio = await synthesizeMinimax(text, voiceConfig, options?.emotion);
+        if (audio) recordModelUsage({ category: "audio", model: voiceConfig.model || "speech-01-turbo", label: "语音合成" });
+        return audio;
     }
 
     if (provider === "OpenAI") {
-        return synthesizeOpenAI(text, voiceConfig);
+        const audio = await synthesizeOpenAI(text, voiceConfig);
+        if (audio) recordModelUsage({ category: "audio", model: voiceConfig.model || "tts-1", label: "语音合成" });
+        return audio;
     }
 
     return null;

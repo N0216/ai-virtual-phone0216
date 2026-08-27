@@ -3,6 +3,7 @@ import { loadImageGenerationSettings } from "./settings-storage";
 import { getChatImageFromIndexedDB } from "./chat-asset-storage";
 import { storeMediaBlob } from "./media-cache-storage";
 import { throwIfAborted } from "./abort-utils";
+import { recordModelUsage } from "./model-usage";
 
 export type ImageGenerationResult = {
   mediaRef: string;
@@ -526,6 +527,11 @@ export async function generateImageFromConfiguredApi(params: {
   const data = settings.requestMode === "direct"
     ? await generateImageDirect({ settings, prompt, referenceImageDataUrl, signal: params.signal })
     : await generateImageViaServerOrProxy({ settings, prompt, referenceImageDataUrl, signal: params.signal });
+  recordModelUsage({
+    category: "image",
+    model: settings.model,
+    label: referenceImageDataUrl ? "参考图生图" : "文字生图",
+  });
 
   throwIfAborted(params.signal);
   const mimeType = data.mimeType || "image/png";

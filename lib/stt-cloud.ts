@@ -8,6 +8,7 @@
 
 import { loadBindingConfig, loadVoiceConfigs, resolveBinding } from "./settings-storage";
 import type { VoiceApiConfig } from "./settings-types";
+import { recordModelUsage } from "./model-usage";
 
 export type CloudSttConfig = {
     baseUrl: string;
@@ -157,12 +158,16 @@ export async function transcribeAudioBlob(blob: Blob, config: CloudSttConfig): P
             throw new Error(`语音识别 API 错误 ${res.status}: ${text.slice(0, 200)}`);
         }
         const contentType = (res.headers.get("content-type") || "").toLowerCase();
+        let text: string;
         if (contentType.includes("json")) {
             const data = await res.json() as { text?: unknown };
-            return typeof data.text === "string" ? data.text.trim() : "";
+            text = typeof data.text === "string" ? data.text.trim() : "";
+        } else {
+            // response_format=text 风格的中转直接回纯文本
+            text = (await res.text()).trim();
         }
-        // response_format=text 风格的中转直接回纯文本
-        return (await res.text()).trim();
+        recordModelUsage({ category: "audio", model: config.model, label: "语音转文字" });
+        return text;
     } catch (e) {
         if (e instanceof DOMException && e.name === "AbortError") {
             throw new Error(`语音识别超时（超过 ${Math.round(TRANSCRIBE_TIMEOUT_MS / 1000)} 秒无响应）`);

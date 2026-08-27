@@ -12,6 +12,7 @@ import { hasAccountPushSubscription } from "./push-client";
 import { isPersonalPushCloudActive, loadPersonalPushCloudState, personalPushFetch } from "./personal-push-cloud";
 import { removeTimedWakeSchedule } from "./timed-wake-storage";
 import { loadScreenChatSettings, saveScreenChatAck } from "./reality-bridge/storage";
+import { estimateUsageFromText, recordModelUsage, usageCategoryForChatRequest } from "./model-usage";
 
 type OutboxEntry = {
     id: string;
@@ -29,6 +30,8 @@ type OutboxEntry = {
         appTags?: string[];
         followUpCount?: number;
         armAt?: string;
+        usageModel?: string;
+        usageRequestChars?: number;
     } | null;
     created_at: string;
 };
@@ -181,6 +184,20 @@ export async function consumeServerOutbox(options?: { silent?: boolean; force?: 
                         consumedIds.push(entry.id);
                         if (entry.trigger_key) handledTriggerKeys.add(entry.trigger_key);
                         continue;
+                    }
+
+                    if (usageCategoryForChatRequest(meta.appId ?? "chat", meta.appTags) === "auto_wake") {
+                        const estimated = estimateUsageFromText(
+                            typeof meta.usageRequestChars === "number" ? meta.usageRequestChars : 1,
+                            entry.raw_text.length,
+                        );
+                        recordModelUsage({
+                            category: "auto_wake",
+                            model: meta.usageModel,
+                            label: "个人云离线醒来",
+                            ...estimated,
+                            estimated: true,
+                        });
                     }
 
                     let text = stripHallucinatedTimestamps(entry.raw_text.trim());

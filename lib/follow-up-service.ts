@@ -57,6 +57,7 @@ import {
     saveMenstrualPeriodCareTrigger,
     type MenstrualPeriodCareEvent,
 } from "./menstrual-storage";
+import { canStartAutoWakeModelCall, usageCategoryForChatRequest } from "./model-usage";
 
 // ── Constants ──────────────────────────────────────────────
 const MAX_FOLLOW_UPS = 10;
@@ -290,6 +291,13 @@ async function generateBackgroundCompletionRounds(
     options: Parameters<typeof generateChatCompletion>[2],
 ): Promise<BackgroundCompletionRound[]> {
     const rounds: BackgroundCompletionRound[] = [];
+    if (usageCategoryForChatRequest("chat", options?.appTags) === "auto_wake") {
+        const allowed = canStartAutoWakeModelCall();
+        if (!allowed.ok) {
+            console.info(`[BackgroundReply] ${allowed.reason || "今日自动醒来用量已达上限"}，本次静默跳过。`);
+            return rounds;
+        }
+    }
     // 每轮 LLM 调用的思维链：onReasoning 先于该轮 onTextPart 触发，挂到该轮文本上
     let pendingReasoning: string | undefined;
     const result = await generateChatCompletion(session, messages, options, {

@@ -34,6 +34,7 @@ import {
 import { loadCharacters } from "./character-storage";
 import type { RegexConfig } from "./settings-types";
 import type { LLMMessage } from "./llm-prompt-assembler";
+import { canStartAutoWakeModelCall } from "./model-usage";
 
 // ── 离线来电：让 AI 自己决定"这条主动消息要不要改成打电话" ──────────
 // 只在主动类离线任务（冷场重连/定时唤醒）的生成快照里注入一句能力说明；
@@ -259,6 +260,7 @@ export async function armFollowUpBailout(
     fireAt: number,
 ): Promise<void> {
     if (!bailoutEnabled()) return;
+    if (!canStartAutoWakeModelCall().ok) return;
     try {
         if (!(await hasAccountPushSubscription())) return;
         if (isWithinPushQuietHours(fireAt + FOLLOWUP_BAILOUT_GRACE_MS)) return; // 安静时段不打扰
@@ -305,6 +307,8 @@ export async function armFollowUpBailout(
                         appId: "chat",
                         appTags: ["chat", "text", "followup"],
                         followUpCount: count,
+                        usageModel: config.defaultModel,
+                        usageRequestChars: JSON.stringify(request.body).length,
                     },
                 },
             }),
@@ -387,6 +391,8 @@ function buildQuietWindowMeta(): { startMin: number; endMin: number; tzOffsetMin
  *  服务端触发一次后会自动排下一发（连发上限内），用户回复后客户端重挂新周期。 */
 export async function armIdleReconnectBailout(rule: IdleReconnectRule): Promise<BailoutArmResult> {
     if (!bailoutEnabled()) return { ok: false, reason: "当前环境不支持服务端离线预约" };
+    const globalBudget = canStartAutoWakeModelCall();
+    if (!globalBudget.ok) return { ok: false, reason: globalBudget.reason || "今日自动醒来用量已达上限" };
     try {
         if (!(await hasAccountPushSubscription())) return { ok: false, reason: "当前账号没有可用的离线推送订阅" };
         const session = loadChatSessions().find(s => s.id === rule.sessionId);
@@ -473,6 +479,8 @@ export async function armIdleReconnectBailout(rule: IdleReconnectRule): Promise<
                 appId: "chat",
                 appTags: ["chat", "text", "idle_wake"],
                 armAt: new Date(fireAt).toISOString(),
+                usageModel: config.defaultModel,
+                usageRequestChars: JSON.stringify(request.body).length,
                 idleReconnect: { ruleId: rule.id, firedAt: fireAt },
                 ...(remaining > 0 ? { idleRepeat: { intervalMs, remaining, quietWin: buildQuietWindowMeta() } } : {}),
             },
@@ -495,6 +503,8 @@ export async function armIdleReconnectBailout(rule: IdleReconnectRule): Promise<
  *  "已过X分钟"的语境按预定触发时刻精确烤入。 */
 export async function armTimedWakeBailout(schedule: TimedWakeSchedule): Promise<BailoutArmResult> {
     if (!bailoutEnabled()) return { ok: false, reason: "当前环境不支持服务端离线预约" };
+    const globalBudget = canStartAutoWakeModelCall();
+    if (!globalBudget.ok) return { ok: false, reason: globalBudget.reason || "今日自动醒来用量已达上限" };
     try {
         if (!(await hasAccountPushSubscription())) return { ok: false, reason: "当前账号没有可用的离线推送订阅" };
         if (isWithinPushQuietHours(schedule.fireAt)) return { ok: false, reason: "触发时间落在推送安静时段内" };
@@ -534,6 +544,8 @@ export async function armTimedWakeBailout(schedule: TimedWakeSchedule): Promise<
                 appId: "chat",
                 appTags: ["chat", "text", wakeTag],
                 armAt: new Date(schedule.fireAt).toISOString(),
+                usageModel: config.defaultModel,
+                usageRequestChars: JSON.stringify(request.body).length,
             },
         });
         return posted ? { ok: true } : { ok: false, reason: "服务端预约接口没有确认成功" };
@@ -546,6 +558,7 @@ export async function armTimedWakeBailout(schedule: TimedWakeSchedule): Promise<
 /** 经期关怀兜底：预测未来 7 天内的关怀日，为选中的角色各挂一单（每周期幂等）。 */
 export async function armPeriodCareBailouts(): Promise<void> {
     if (!bailoutEnabled()) return;
+    if (!canStartAutoWakeModelCall().ok) return;
     try {
         const config = loadMenstrualConfig();
         if (!config.periodCareEnabled || config.periodCareCharacterIds.length === 0) return;
@@ -595,6 +608,8 @@ export async function armPeriodCareBailouts(): Promise<void> {
                         appId: "chat",
                         appTags: ["chat", "text", "period_care"],
                         armAt: new Date(executeAtMs).toISOString(),
+                        usageModel: apiConfig.defaultModel,
+                        usageRequestChars: JSON.stringify(request.body).length,
                         periodCare: { characterId: session.contactId, cycleKey: event.cycleKey },
                     },
                 });

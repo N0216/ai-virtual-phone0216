@@ -486,7 +486,13 @@ async function compactToolResultWithAssignedModel(
             role: "user",
             content: `工具：${call.name}\n参数：${JSON.stringify(call.args)}\n原始结果：\n${result.data}`,
         },
-    ], { temperature: 0.1, max_tokens: 900, signal: context.signal });
+    ], {
+        temperature: 0.1,
+        max_tokens: 900,
+        signal: context.signal,
+        usageCategory: "tool",
+        usageLabel: `整理工具结果：${call.name}`,
+    });
 
     if (!response.content?.trim()) return result;
     return { ...result, data: response.content.trim() };

@@ -3,6 +3,11 @@
 // request headers, and response parsing. All LLM-calling modules should use these.
 
 import type { ApiConfig } from "./settings-types";
+import {
+    estimateUsageFromText,
+    recordModelUsage,
+    type ModelUsageCategory,
+} from "./model-usage";
 
 const SIMPLE_ANTHROPIC_AUTO_MAX_TOKENS = 8192;
 
@@ -118,8 +123,20 @@ export function isNativeGoogleApi(config: ApiConfig): boolean {
 export async function simpleLLMCall(
     config: ApiConfig,
     messages: { role: string; content: string }[],
-    options?: { temperature?: number; max_tokens?: number; signal?: AbortSignal },
-): Promise<{ content: string | null; error?: string; finishReason?: string; wasTruncated?: boolean }> {
+    options?: {
+        temperature?: number;
+        max_tokens?: number;
+        signal?: AbortSignal;
+        usageCategory?: ModelUsageCategory;
+        usageLabel?: string;
+    },
+): Promise<{
+    content: string | null;
+    error?: string;
+    finishReason?: string;
+    wasTruncated?: boolean;
+    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+}> {
     const baseUrl = determineBaseUrl(config);
     if (!baseUrl || !config.apiKey) {
         return { content: null, error: "API 地址或密钥无效" };
@@ -200,17 +217,47 @@ export async function simpleLLMCall(
         const content = extractLLMContent(data, config.provider);
         const finishReason = extractFinishReason(data);
         const wasTruncated = isTruncationFinishReason(finishReason);
+        const usage = extractSimpleUsage(data);
+        const estimatedUsage = estimateUsageFromText(body.length, content?.length || 0);
+        recordModelUsage({
+            category: options?.usageCategory || "background",
+            model: config.defaultModel,
+            label: options?.usageLabel,
+            promptTokens: usage?.prompt_tokens ?? estimatedUsage.promptTokens,
+            completionTokens: usage?.completion_tokens ?? estimatedUsage.completionTokens,
+            totalTokens: usage?.total_tokens ?? estimatedUsage.totalTokens,
+            estimated: !usage?.total_tokens,
+        });
         if (!content) {
             console.warn("[simpleLLMCall] Empty response. Keys:", JSON.stringify(Object.keys(data || {})),
                 "Full:", JSON.stringify(data).slice(0, 500));
-            return { content: null, error: describeEmptyLLMResponse(data, finishReason, wasTruncated, config), finishReason, wasTruncated };
+            return { content: null, error: describeEmptyLLMResponse(data, finishReason, wasTruncated, config), finishReason, wasTruncated, usage };
         }
 
-        return { content, finishReason, wasTruncated };
+        return { content, finishReason, wasTruncated, usage };
     } catch (err) {
         console.warn("[simpleLLMCall] fetch error:", err);
         return { content: null, error: `请求失败: ${err instanceof Error ? err.message : String(err)}` };
     }
+}
+
+function extractSimpleUsage(data: Record<string, unknown>): { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | undefined {
+    const source = data as any;
+    const raw = source?.usage || source?.usageMetadata;
+    if (!raw || typeof raw !== "object") return undefined;
+    const prompt = Number(raw.prompt_tokens ?? raw.input_tokens ?? raw.promptTokenCount);
+    const completion = Number(raw.completion_tokens ?? raw.output_tokens ?? raw.candidatesTokenCount);
+    const total = Number(raw.total_tokens ?? raw.totalTokenCount);
+    const normalized = {
+        prompt_tokens: Number.isFinite(prompt) ? Math.max(0, Math.round(prompt)) : undefined,
+        completion_tokens: Number.isFinite(completion) ? Math.max(0, Math.round(completion)) : undefined,
+        total_tokens: Number.isFinite(total) ? Math.max(0, Math.round(total)) : undefined,
+    };
+    if (normalized.total_tokens === undefined && normalized.prompt_tokens === undefined && normalized.completion_tokens === undefined) return undefined;
+    if (normalized.total_tokens === undefined) {
+        normalized.total_tokens = (normalized.prompt_tokens || 0) + (normalized.completion_tokens || 0);
+    }
+    return normalized;
 }
 
 export function extractFinishReason(data: Record<string, unknown>): string | undefined {
