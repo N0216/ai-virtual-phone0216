@@ -9,7 +9,9 @@ import type {
 import {
     findEnabledInternalSubToolDefinition,
     getEnabledInternalCapabilities,
+    getInternalCapabilitySubToolDefinitions,
     getInternalCapabilityToolDefinition,
+    type InternalToolDefinition,
 } from "./internal-capability-storage";
 import { loadCustomAppToolsForContext, type RegisteredCustomAppExtension } from "./custom-app-sdk-registry";
 import type { CustomAppToolDefinition } from "./custom-app-types";
@@ -362,6 +364,8 @@ export type EnabledTool = {
     restTools?: RestToolConfig[];
     compositeTools?: CompositeToolConfig[];
     mcpTools?: McpDiscoveredTool[];
+    internalTools?: InternalToolDefinition[];
+    internalSubToolName?: string;
 };
 
 export function enabledToolKey(tool: Pick<EnabledTool, "source" | "sourceId">): string {
@@ -384,12 +388,19 @@ export function customAppToolPermissionKey(appId: string, toolId: string): strin
     return `custom_app:${appId}:${toolId}`;
 }
 
+export function internalSubToolPermissionKey(capabilityId: string, toolName: string): string {
+    return `internal:${capabilityId}:${toolName}`;
+}
+
 export function resolvedToolPermissionKey(tool: EnabledTool): string {
     if (tool.source === "mcp") return mcpToolPermissionKey(tool.sourceId, tool.name);
     if (tool.source === "rest") return restToolPermissionKey(tool.sourceId);
     if (tool.source === "composite") return compositeToolPermissionKey(tool.sourceId);
     if (tool.source === "custom_app" && tool.customAppId && tool.customToolId) {
         return customAppToolPermissionKey(tool.customAppId, tool.customToolId);
+    }
+    if (tool.source === "internal" && tool.internalSubToolName) {
+        return internalSubToolPermissionKey(tool.sourceId, tool.internalSubToolName);
     }
     return enabledToolKey(tool);
 }
@@ -472,6 +483,7 @@ function buildGloballyEnabledTools(appId?: string): EnabledTool[] {
     for (const capability of getEnabledInternalCapabilities(appId)) {
         const tool = getInternalCapabilityToolDefinition(capability);
         if (!tool) continue;
+        const internalTools = getInternalCapabilitySubToolDefinitions(capability);
         tools.push({
             name: tool.name,
             description: tool.description,
@@ -479,6 +491,7 @@ function buildGloballyEnabledTools(appId?: string): EnabledTool[] {
             usageGuide: tool.usageGuide,
             source: "internal",
             sourceId: capability.id,
+            internalTools: internalTools.length > 0 ? internalTools : undefined,
         });
     }
 
@@ -548,6 +561,11 @@ function filterToolsForCharacter(
             if (children.length > 0) result.push({ ...tool, customAppTools: children });
             continue;
         }
+        if (tool.source === "internal" && tool.internalTools?.length) {
+            const children = tool.internalTools.filter(child => allowed(internalSubToolPermissionKey(tool.sourceId, child.name)));
+            if (children.length > 0) result.push({ ...tool, internalTools: children });
+            continue;
+        }
         if (allowed(enabledToolKey(tool))) result.push(tool);
     }
     return result;
@@ -600,12 +618,25 @@ export function findEnabledToolForSchema(
                 customToolId: tool.id,
             };
         }
+        for (const tool of group.internalTools || []) {
+            if (!toolNameMatches(tool.name, name, macroContext)) continue;
+            return {
+                name: tool.name,
+                description: tool.description,
+                parameterSchema: tool.parameterSchema,
+                usageGuide: tool.usageGuide,
+                source: "internal",
+                sourceId: group.sourceId,
+                internalSubToolName: tool.name,
+            };
+        }
     }
 
     const internalSubTool = findEnabledInternalSubToolDefinition(name, appId);
     if (internalSubTool) {
-        const parentAllowed = roleTools.some(tool => tool.source === "internal" && tool.sourceId === internalSubTool.capability.id);
-        if (!parentAllowed) return undefined;
+        const parent = roleTools.find(tool => tool.source === "internal" && tool.sourceId === internalSubTool.capability.id);
+        if (!parent) return undefined;
+        if (parent.internalTools?.length && !parent.internalTools.some(tool => tool.name === internalSubTool.tool.name)) return undefined;
         return {
             name: internalSubTool.tool.name,
             description: internalSubTool.tool.description,
@@ -613,6 +644,7 @@ export function findEnabledToolForSchema(
             usageGuide: internalSubTool.tool.usageGuide,
             source: "internal",
             sourceId: internalSubTool.capability.id,
+            internalSubToolName: internalSubTool.tool.name,
         };
     }
 

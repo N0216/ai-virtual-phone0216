@@ -61,6 +61,34 @@ export function formatGroupToolsForPrompt(tools: EnabledTool[]): string {
  * Format a single action's parameter schema for the "获取指令" response.
  */
 export function formatToolSchema(tool: EnabledTool, context?: ToolSchemaFormatContext): string {
+    if (tool.source === "internal" && tool.internalTools?.length) {
+        const lines = [
+            `工具组：${tool.name}`,
+            `描述：${tool.description}`,
+            "可执行的具体动作如下。执行时必须使用具体动作名，不要输出工具组名称本身。",
+        ];
+        for (const internalTool of tool.internalTools) {
+            lines.push("", `动作：${internalTool.name}`, `描述：${internalTool.description}`);
+            try {
+                const schema = JSON.parse(internalTool.parameterSchema) as { properties?: Record<string, Record<string, unknown>> };
+                const entries = Object.entries(schema.properties || {});
+                if (entries.length > 0) {
+                    lines.push("参数：");
+                    for (const [key, value] of entries) {
+                        lines.push(`  - ${key} (${String(value.type || "string")})${value.description ? `: ${String(value.description)}` : ""}`);
+                    }
+                }
+            } catch { /* ignore invalid schema */ }
+        }
+        return expandToolMacros([
+            "以下是你获取指令的返回结果：",
+            lines.join("\n"),
+            "请根据用户需求选择一个具体动作，并使用格式：",
+            "[执行动作:具体动作名({参数JSON})]",
+            "禁止输出工具组名称本身。执行动作时只输出动作指令，不要附加闲聊内容。",
+        ].join("\n"), context);
+    }
+
     if (tool.usageGuide) return expandToolMacros(tool.usageGuide, context);
 
     if (tool.source === "rest_package") {

@@ -99,6 +99,7 @@ export type ToolExecutionContext = {
     appId?: string;
     sessionId?: string;
     characterId?: string;
+    characterDisplayName?: string;
     sourceEngine?: "chat" | "group_chat" | "custom_app";
     toolUsage?: CharacterToolUsage;
     signal?: AbortSignal;
@@ -525,11 +526,12 @@ async function executeSingleToolCall(
         && context.characterId
         && !findEnabledToolForSchema(call.name, context.appId, nameMacroContext, context.characterId, context.toolUsage ?? "chat")
     ) {
+        const roleLabel = context.characterDisplayName?.trim() || nameMacroContext.characterName || "当前角色";
         return {
             name: call.name,
             success: false,
             error: "当前角色未获授权使用该工具",
-            userNotice: "这个角色没有使用该工具的权限",
+            userNotice: `${roleLabel}没有使用「${call.name}」的权限`,
         };
     }
     const preferredType = hint.toolType && hint.toolType !== "auto" && hint.toolType !== "script" ? hint.toolType : undefined;

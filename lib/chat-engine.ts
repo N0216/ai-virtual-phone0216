@@ -1756,8 +1756,7 @@ export function buildNativeChatTools(enabledTools: EnabledTool[], expandedSource
         }
 
         if (tool.source === "internal") {
-            const capability = getInternalCapability(tool.sourceId);
-            const subTools = capability ? getInternalCapabilitySubToolDefinitions(capability) : [];
+            const subTools = tool.internalTools || [];
             if (subTools.length > 0) {
                 for (const subTool of subTools) {
                     registerTool(subTool.name, subTool.description, subTool.parameterSchema, sourceKey);
@@ -2079,6 +2078,7 @@ async function generateNativeChatCompletion(
     },
 ): Promise<ChatCompletionResult> {
     const { session, llmMessages, character, config, preset, regexes, userIdentity, options, callbacks, bailoutRef } = params;
+    const characterDisplayName = session.alias?.trim() || character.name;
     const toolUsage = resolveCharacterToolUsage(options?.appTags);
     const enabledTools = getEnabledTools(options?.appId ?? "chat", character.id, toolUsage);
     const requestAppTags = mergeAppTags(options?.appTags, options?.promptProfile?.appTags, options?.appId ?? "chat");
@@ -2167,7 +2167,7 @@ async function generateNativeChatCompletion(
             ...loaderCalls.map(item => `展开「${item.loader.label}」动作说明`),
             ...realNativeCalls.map(call => nativeBundle.displayNameMap.get(call.name) || nativeBundle.nameMap.get(call.name) || call.name),
         ];
-        const actorName = character.name;
+        const actorName = characterDisplayName;
         callbacks?.onToolNotice?.(`${actorName}正在${displayedActionNames.join("、")}...`);
 
         let realResults: Awaited<ReturnType<typeof executeToolCalls>> = [];
@@ -2180,6 +2180,7 @@ async function generateNativeChatCompletion(
                     appId: options?.appId ?? "chat",
                     sessionId: session.id,
                     characterId: session.contactId,
+                    characterDisplayName,
                     sourceEngine: "chat",
                     toolUsage,
                     signal: options?.signal,
@@ -2443,6 +2444,7 @@ async function generateChatCompletionCore(
     bailoutRef: ReplyBailoutRef,
 ): Promise<ChatCompletionResult> {
     const { llmMessages, character, config, preset, regexes, userIdentity, toolsEnabled } = await buildChatPromptMessages(session, history, options);
+    const characterDisplayName = session.alias?.trim() || character.name;
     const requestAppTags = mergeAppTags(options?.appTags, options?.promptProfile?.appTags, options?.appId ?? "chat");
 
     // 追问有自己的排期时兜底（followup:key），这里只为普通回复生成挂单。
@@ -2567,7 +2569,7 @@ async function generateChatCompletionCore(
         if (toolFetches.length > 0) {
             for (const fetch of toolFetches) {
                 throwIfAborted(options?.signal);
-                const actorName = fetch.actor || character.name;
+                const actorName = fetch.actor || characterDisplayName;
                 const toolNotice = `${actorName}正在获取「${fetch.name}」指令...`;
                 callbacks?.onToolNotice?.(toolNotice);
 
@@ -2596,7 +2598,7 @@ async function generateChatCompletionCore(
 
         // Handle [执行动作:xxx({...})] — execute calls
         if (toolCalls.length > 0) {
-            const actorName = toolCalls[0]?.actor || character.name;
+            const actorName = toolCalls[0]?.actor || characterDisplayName;
             const toolNotice = `${actorName}正在${toolCalls.map(t => t.name).join("、")}...`;
             callbacks?.onToolNotice?.(toolNotice);
 
@@ -2607,6 +2609,7 @@ async function generateChatCompletionCore(
                     appId: options?.appId ?? "chat",
                     sessionId: session.id,
                     characterId: session.contactId,
+                    characterDisplayName,
                     sourceEngine: "chat",
                     toolUsage,
                     signal: options?.signal,

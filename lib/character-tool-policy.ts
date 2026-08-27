@@ -66,7 +66,25 @@ export function initializeNewCharacterToolPolicy(characterId: string): void {
 export function ensureCharacterToolPolicy(characterId: string, existingToolKeys: string[]): CharacterToolPolicy {
     const store = loadStore();
     const current = store[characterId];
-    if (current?.initialized) return current;
+    if (current?.initialized) {
+        let changed = false;
+        for (const key of existingToolKeys) {
+            if (current.permissions[key]) continue;
+            const parentKey = key.startsWith("internal:") && key.split(":").length >= 3
+                ? key.split(":").slice(0, 2).join(":")
+                : undefined;
+            const parent = parentKey ? current.permissions[parentKey] : undefined;
+            if (!parent) continue;
+            current.permissions[key] = { ...parent };
+            changed = true;
+        }
+        if (changed) {
+            current.updatedAt = Date.now();
+            store[characterId] = current;
+            saveStore(store);
+        }
+        return current;
+    }
     const now = Date.now();
     const permissions: Record<string, CharacterToolPermission> = {};
     for (const key of existingToolKeys) {
@@ -120,10 +138,17 @@ export function isToolAllowedForCharacter(
     const policy = loadCharacterToolPolicy(characterId);
     // Backwards compatibility for roles created before role-level permissions.
     if (!policy?.initialized) return usage === "chat";
-    const permission = policy.permissions[toolKey];
+    const parentKey = toolKey.startsWith("internal:") && toolKey.split(":").length >= 3
+        ? toolKey.split(":").slice(0, 2).join(":")
+        : undefined;
+    const permission = policy.permissions[toolKey] || (parentKey ? policy.permissions[parentKey] : undefined);
     return usage === "auto_wake" ? permission?.autoWakeEnabled === true : permission?.chatEnabled === true;
 }
 
 export function getCharacterToolApiConfigId(characterId: string, toolKey: string): string | undefined {
-    return loadCharacterToolPolicy(characterId)?.permissions[toolKey]?.apiConfigId;
+    const policy = loadCharacterToolPolicy(characterId);
+    const parentKey = toolKey.startsWith("internal:") && toolKey.split(":").length >= 3
+        ? toolKey.split(":").slice(0, 2).join(":")
+        : undefined;
+    return policy?.permissions[toolKey]?.apiConfigId || (parentKey ? policy?.permissions[parentKey]?.apiConfigId : undefined);
 }

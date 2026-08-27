@@ -196,6 +196,10 @@ export type ChatMessage = {
         memoryRequestStatus?: "pending" | "approved" | "ignored";
         fileType?: "audio" | "image" | "video" | "file";
         fileName?: string;
+        fileMimeType?: string;
+        fileSize?: number;
+        fileReadable?: boolean;
+        fileContentTruncated?: boolean;
         fileDuration?: number;
         useReferenceImage?: boolean; // AI photo tag: whether to send the character reference image to the generator
         imageGenerationMediaRef?: string;
