@@ -51,7 +51,7 @@ import { useKeyboardDismissAutoSend } from "@/components/chat/use-keyboard-dismi
 import { cancelBailoutKey } from "@/lib/push-bailout-client";
 import { PENDING_REPLY_PREFIX } from "@/lib/friend-request-engine";
 import type { UserIdentity } from "@/components/settings/user-identity";
-import { AlertCircle, Blocks, Check, Trash2, User, ChevronLeft, ChevronRight, Clapperboard, Clock, Gift, Languages, Loader2, MoreHorizontal, X } from "lucide-react";
+import { AlertCircle, Blocks, Check, Trash2, User, ChevronLeft, ChevronRight, Clapperboard, Clock, FileUp, Gift, Languages, Loader2, MoreHorizontal, X } from "lucide-react";
 import { setDebugChatState } from "@/lib/debug-store";
 import { SessionCustomCSS } from "@/components/ui/session-custom-css";
 import { setChatActive } from "@/lib/music-action-queue";
@@ -87,6 +87,8 @@ import { extractTextToolDirectiveText } from "@/lib/text-tool-protocol";
 import { emitChatPluginEvent, getChatPluginHookBus, runChatPluginTransform } from "@/lib/chat-plugin-hooks";
 import { CHAT_PLUGIN_TOAST_EVENT, getChatPluginRuntime } from "@/lib/chat-plugin-runtime";
 import { ChatPluginSlot } from "@/components/chat/chat-plugin-slot";
+import { storeMediaBlob } from "@/lib/media-cache-storage";
+import { MAX_CHAT_FILE_BYTES, prepareChatFile } from "@/lib/chat-file-attachment";
 
 // ── Call system message detection ──────────────────────────
 // Call messages are stored with user/assistant role for correct prompt alternation,
@@ -622,6 +624,7 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
     onStartVideoCall: () => void;
     onStartVoiceCall: () => void;
     onSendText: (text: string) => boolean;
+    onSendFile: (file: File) => Promise<void>;
     onStopGeneration: () => void;
     onTriggerAIResponse: () => void;
 	onSendSticker: (name: string, url?: string) => void;
@@ -653,12 +656,14 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
     onStartVideoCall,
     onStartVoiceCall,
     onSendText,
+    onSendFile,
     onStopGeneration,
     onTriggerAIResponse,
     onSendSticker,
 }, ref) {
     const [inputText, setInputText] = useState("");
     const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+    const fileInputRef = useRef<HTMLInputElement | null>(null);
     // 表情包搜索联想：ESC/失焦置 true 隐藏，输入变化重新开启
     const [suggestClosed, setSuggestClosed] = useState(false);
     // 围观群/被禁言：输入与富媒体入口全部锁定，只留线下切换和生成按钮
@@ -715,6 +720,7 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
     );
     const suggestEnabled = !inputLocked && !panelOpen && !suggestClosed && inputText.trim().length > 0;
     const plusMenuItems = [
+        { icon: <FileUp size={22} strokeWidth={1.5} color="var(--c-text)" />, label: "文件", onClick: () => fileInputRef.current?.click() },
         { icon: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--c-text)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2" /><circle cx="8.5" cy="8.5" r="1.5" /><polyline points="21 15 16 10 5 21" /></svg>, label: "照片墙", onClick: () => onOpenRichModal("photo") },
         { icon: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--c-text)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2" /><line x1="7" y1="8" x2="17" y2="8" /><line x1="7" y1="12" x2="14" y2="12" /><line x1="7" y1="16" x2="11" y2="16" /></svg>, label: "文字图片", onClick: () => onOpenRichModal("text_photo") },
         { icon: <AlertCircle size={22} strokeWidth={1.5} color="var(--c-text)" />, label: "系统指令", onClick: () => onOpenRichModal("system_instruction") },
@@ -737,6 +743,19 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
 
     return (
         <div className="chat-input-bar chat-room-main-pane flex flex-col" data-ui="input">
+            <input
+                ref={fileInputRef}
+                type="file"
+                hidden
+                disabled={inputLocked}
+                onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    event.target.value = "";
+                    if (!file) return;
+                    onClosePanels();
+                    void onSendFile(file);
+                }}
+            />
             {theaterMode && (
                 <div className="chat-theater-mode-strip" role="status">
                     <span className="chat-theater-mode-icon" aria-hidden="true">
@@ -3293,6 +3312,38 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
         setMessages(prev => [...prev, newMsg]);
         setPendingGenerate(true);
         return true;
+    };
+
+    const handleSendFile = async (file: File): Promise<void> => {
+        if (file.size > MAX_CHAT_FILE_BYTES) {
+            showChatToast("文件不能超过 20 MB");
+            return;
+        }
+        if (file.size <= 0) {
+            showChatToast("这个文件是空的");
+            return;
+        }
+        try {
+            const prepared = await prepareChatFile(file);
+            const mediaRef = await storeMediaBlob(file, file.type || "application/octet-stream", prepared.fileType);
+            const sent = sendRichMessage("media_file", {
+                fileType: prepared.fileType,
+                fileName: file.name,
+                fileMimeType: file.type || "application/octet-stream",
+                fileSize: file.size,
+                fileReadable: prepared.readable,
+                fileContentTruncated: prepared.truncated,
+                label: file.name,
+            }, prepared.content, mediaRef);
+            if (!sent) return;
+            if (!prepared.readable) {
+                showChatToast(prepared.fileType === "file" ? "文件已发送，但这个格式暂时不能读取正文" : "文件已发送");
+            } else if (prepared.truncated) {
+                showChatToast("文件已发送，正文过长，已截取前一部分");
+            }
+        } catch (error) {
+            showChatToast(`文件发送失败：${error instanceof Error ? error.message : String(error)}`);
+        }
     };
 
     const sendSystemInstruction = (content: string): boolean => {
@@ -5922,6 +5973,7 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                 onStartVideoCall={() => { cancelFollowUp(session.id); setShowPlusMenu(false); setCallInitiator("user"); setShowVideoCall(true); }}
                 onStartVoiceCall={() => { cancelFollowUp(session.id); setShowPlusMenu(false); setCallInitiator("user"); setShowVoiceCall(true); }}
                 onSendText={handleSendText}
+                onSendFile={handleSendFile}
                 onStopGeneration={clearStuckGeneration}
                 onTriggerAIResponse={triggerAIResponse}
                 onSendSticker={(name, url) => { setShowStickerPanel(false); sendRichMessage("sticker", { label: name, stickerUrl: url }); }}

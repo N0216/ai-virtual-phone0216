@@ -6,6 +6,7 @@ import { PageShell } from "@/components/ui/page-shell";
 import { Toggle } from "@/components/ui/form";
 import {
     ensureCharacterToolPolicy,
+    isToolAllowedForCharacter,
     loadCharacterToolPolicy,
     saveCharacterToolPermission,
     type CharacterToolPolicy,
@@ -15,6 +16,7 @@ import {
     customAppToolPermissionKey,
     enabledToolKey,
     getEnabledTools,
+    internalSubToolPermissionKey,
     mcpToolPermissionKey,
     restToolPermissionKey,
     type EnabledTool,
@@ -45,6 +47,12 @@ function toolGroups(): ToolGroup[] {
             leaves = (tool.mcpTools || []).map(item => ({ key: mcpToolPermissionKey(tool.sourceId, item.name), name: item.name, description: item.description || "MCP 工具" }));
         } else if (tool.source === "custom_app_package") {
             leaves = (tool.customAppTools || []).map(item => ({ key: customAppToolPermissionKey(item.appId, item.id), name: item.name, description: item.description || `来自「${item.appName}」` }));
+        } else if (tool.source === "internal" && tool.internalTools?.length) {
+            leaves = tool.internalTools.map(item => ({
+                key: internalSubToolPermissionKey(tool.sourceId, item.name),
+                name: item.name,
+                description: item.description,
+            }));
         } else {
             leaves = [{ key: enabledToolKey(tool), name: tool.name, description: tool.description }];
         }
@@ -61,7 +69,7 @@ export function getRoleToolChatEnabledCount(characterId: string): number {
     const policy = loadCharacterToolPolicy(characterId);
     const groups = toolGroups();
     if (!policy?.initialized) return groups.reduce((sum, group) => sum + group.leaves.length, 0);
-    return groups.reduce((sum, group) => sum + group.leaves.filter(leaf => policy.permissions[leaf.key]?.chatEnabled).length, 0);
+    return groups.reduce((sum, group) => sum + group.leaves.filter(leaf => isToolAllowedForCharacter(characterId, leaf.key, "chat")).length, 0);
 }
 
 export function CharacterToolsPage({
