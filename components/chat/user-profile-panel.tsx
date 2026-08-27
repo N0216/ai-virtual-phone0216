@@ -6,6 +6,7 @@ import {
     loadFollowUpConfig,
     saveFollowUpConfig,
     getDefaultFollowUpConfig,
+    loadApiConfigs,
     resolveUserIdentity,
 } from "@/lib/settings-storage";
 import { loadChatAppSettings, saveChatAppSettings } from "@/lib/chat-storage";
@@ -30,7 +31,18 @@ import { isPersonalPushCloudActive, setPersonalPushCloudScheduled } from "@/lib/
 import { loadPushCloudScheduled, savePushCloudScheduled } from "@/lib/cloud-deploy-status";
 import { armIdleReconnectBailout, armTimedWakeBailout, cancelBailoutKey, cancelBailoutPrefix } from "@/lib/push-bailout-client";
 import { loadTimedWakeSchedules, makeTimedWakeId, removeTimedWakeSchedule, saveTimedWakeSchedule, type TimedWakeSchedule } from "@/lib/timed-wake-storage";
-import { IDLE_RECONNECT_MAX_CONSECUTIVE, loadIdleReconnectRules, removeIdleReconnectRule, upsertIdleReconnectRule, type IdleReconnectRule } from "@/lib/idle-reconnect-storage";
+import {
+    DEFAULT_IDLE_RECONNECT_DAILY_TOKEN_BUDGET,
+    DEFAULT_IDLE_RECONNECT_MAX_CHECKS_PER_DAY,
+    DEFAULT_IDLE_RECONNECT_MAX_MESSAGES_PER_DAY,
+    IDLE_RECONNECT_MAX_CONSECUTIVE,
+    getIdleReconnectDailyUsage,
+    getIdleReconnectLimits,
+    loadIdleReconnectRules,
+    removeIdleReconnectRule,
+    upsertIdleReconnectRule,
+    type IdleReconnectRule,
+} from "@/lib/idle-reconnect-storage";
 import { addChatContact, createOrGetSession } from "@/lib/chat-storage";
 import { kvGet, kvSet, kvRemove } from "@/lib/kv-db";
 import { formatWalletAmount, getWalletBalance, loadWalletState, WALLET_UPDATED_EVENT } from "@/lib/wallet-storage";
@@ -1105,8 +1117,12 @@ function OfflinePushSettingsPage({ onBack }: { onBack: () => void }) {
     const [tmCharId, setTmCharId] = useState("");
     const [tmValue, setTmValue] = useState("60");
     const [tmUnit, setTmUnit] = useState<"minute" | "hour" | "day">("minute");
-    const [tmIdleValue, setTmIdleValue] = useState("5");
-    const [tmIdleUnit, setTmIdleUnit] = useState<"minute" | "hour" | "day">("minute");
+    const [tmIdleValue, setTmIdleValue] = useState("3");
+    const [tmIdleUnit, setTmIdleUnit] = useState<"minute" | "hour" | "day">("hour");
+    const [tmWakeApiConfigId, setTmWakeApiConfigId] = useState("");
+    const [tmMaxChecks, setTmMaxChecks] = useState(String(DEFAULT_IDLE_RECONNECT_MAX_CHECKS_PER_DAY));
+    const [tmMaxMessages, setTmMaxMessages] = useState(String(DEFAULT_IDLE_RECONNECT_MAX_MESSAGES_PER_DAY));
+    const [tmDailyTokenBudget, setTmDailyTokenBudget] = useState(String(DEFAULT_IDLE_RECONNECT_DAILY_TOKEN_BUDGET));
     const [tmHint, setTmHint] = useState<string | null>(null);
     const [tmBusy, setTmBusy] = useState(false);
 
@@ -1121,6 +1137,35 @@ function OfflinePushSettingsPage({ onBack }: { onBack: () => void }) {
         void getOfflinePushState().then(setOfflinePushState);
         refreshTimedSchedules();
     }, []);
+
+    useEffect(() => {
+        if (!tmCharId) return;
+        const existing = loadIdleReconnectRules().find(rule => rule.characterId === tmCharId);
+        if (!existing) {
+            setTmIdleValue("3");
+            setTmIdleUnit("hour");
+            setTmWakeApiConfigId("");
+            setTmMaxChecks(String(DEFAULT_IDLE_RECONNECT_MAX_CHECKS_PER_DAY));
+            setTmMaxMessages(String(DEFAULT_IDLE_RECONNECT_MAX_MESSAGES_PER_DAY));
+            setTmDailyTokenBudget(String(DEFAULT_IDLE_RECONNECT_DAILY_TOKEN_BUDGET));
+            return;
+        }
+        const limits = getIdleReconnectLimits(existing);
+        if (existing.intervalMinutes % 1440 === 0) {
+            setTmIdleValue(String(existing.intervalMinutes / 1440));
+            setTmIdleUnit("day");
+        } else if (existing.intervalMinutes % 60 === 0) {
+            setTmIdleValue(String(existing.intervalMinutes / 60));
+            setTmIdleUnit("hour");
+        } else {
+            setTmIdleValue(String(existing.intervalMinutes));
+            setTmIdleUnit("minute");
+        }
+        setTmWakeApiConfigId(existing.wakeApiConfigId || "");
+        setTmMaxChecks(String(limits.maxChecksPerDay));
+        setTmMaxMessages(String(limits.maxMessagesPerDay));
+        setTmDailyTokenBudget(String(limits.dailyTokenBudget));
+    }, [tmCharId]);
 
     const handleOfflinePushToggle = async (enabled: boolean) => {
         if (offlinePushBusy) return;
@@ -1173,16 +1218,31 @@ function OfflinePushSettingsPage({ onBack }: { onBack: () => void }) {
         const totalMinutes = Math.max(1, Math.round(amount * UNIT_MS[tmIdleUnit] / 60000));
         if (totalMinutes < 1) { setTmHint("沉默阈值至少 1 分钟。"); return; }
         if (totalMinutes > 72 * 60) { setTmHint("最长 72 小时。"); return; }
+        const maxChecksPerDay = Math.round(Number(tmMaxChecks));
+        const maxMessagesPerDay = Math.round(Number(tmMaxMessages));
+        const dailyTokenBudget = Math.round(Number(tmDailyTokenBudget));
+        if (!Number.isFinite(maxChecksPerDay) || maxChecksPerDay < 1 || maxChecksPerDay > 96) { setTmHint("每日检查次数请填写 1～96。"); return; }
+        if (!Number.isFinite(maxMessagesPerDay) || maxMessagesPerDay < 1 || maxMessagesPerDay > 20) { setTmHint("每日主动消息请填写 1～20。"); return; }
+        if (!Number.isFinite(dailyTokenBudget) || dailyTokenBudget < 1000 || dailyTokenBudget > 1_000_000) { setTmHint("每日 Token 预算请填写 1000～1000000。"); return; }
         addChatContact(tmCharId);
         const session = createOrGetSession(tmCharId);
+        const existing = loadIdleReconnectRules().find(item => item.characterId === tmCharId);
         const rule: IdleReconnectRule = {
-            id: `idle_${tmCharId}_${Date.now().toString(36)}`,
+            id: existing?.id || `idle_${tmCharId}_${Date.now().toString(36)}`,
             characterId: tmCharId,
             sessionId: session.id,
             intervalMinutes: totalMinutes,
-            intent: "",
-            consecutiveCount: 0,
-            createdAt: Date.now(),
+            intent: existing?.intent || "",
+            wakeApiConfigId: tmWakeApiConfigId || undefined,
+            maxChecksPerDay,
+            maxMessagesPerDay,
+            dailyTokenBudget,
+            dailyUsage: existing?.dailyUsage,
+            consecutiveCount: existing?.consecutiveCount || 0,
+            lastFiredAt: existing?.lastFiredAt,
+            lastCheckedAt: existing?.lastCheckedAt,
+            suppressedUntil: existing?.suppressedUntil,
+            createdAt: existing?.createdAt || Date.now(),
         };
         upsertIdleReconnectRule(rule);
         setTmBusy(true);
@@ -1190,8 +1250,8 @@ function OfflinePushSettingsPage({ onBack }: { onBack: () => void }) {
         const armResult = await armIdleReconnectBailout(rule);
         setTmBusy(false);
         setTmHint(armResult.ok
-            ? `已创建：超过 ${amount}${UNIT_LABEL[tmIdleUnit]}没消息时，TA 会主动来找你；服务端离线推送已预约。`
-            : `已创建本地规则，但离线推送未预约成功：${armResult.reason}`);
+            ? `已保存：每隔 ${amount}${UNIT_LABEL[tmIdleUnit]}允许 TA 醒来判断一次；TA 可以发消息，也可以保持安静。`
+            : `已保存本地规则，但离线推送未预约成功：${armResult.reason}`);
         refreshTimedSchedules();
     };
 
@@ -1374,7 +1434,7 @@ function OfflinePushSettingsPage({ onBack }: { onBack: () => void }) {
                                 value={tmMode}
                                 onChange={e => setTmMode(e.target.value as "idle" | "once")}
                             >
-                                <option value="idle">长时间没消息时（可重复）</option>
+                                <option value="idle">角色自动醒来（可静默）</option>
                                 <option value="once">固定时间后（一次）</option>
                             </select>
                         </div>
@@ -1423,30 +1483,66 @@ function OfflinePushSettingsPage({ onBack }: { onBack: () => void }) {
                             </div>
                         </div>
                     ) : (
-                        <div className="menu-item">
-                            <ProfileSettingsIcon icon={Clock} color={BINDING_ACCENTS.voice} />
-                            <div className="menu-label-group">
-                                <span className="menu-label">沉默超过</span>
+                        <>
+                            <div className="menu-item">
+                                <ProfileSettingsIcon icon={Clock} color={BINDING_ACCENTS.voice} />
+                                <div className="menu-label-group">
+                                    <span className="menu-label">检查间隔</span>
+                                    <span className="menu-desc">到点只做判断，不代表一定发消息</span>
+                                </div>
+                                <div className="menu-right flex items-center gap-1 ts-13">
+                                    <input
+                                        type="number"
+                                        min={1}
+                                        className="w-[64px] text-right border-none outline-none ts-13 text-[var(--c-text)] bg-transparent"
+                                        value={tmIdleValue}
+                                        onChange={e => setTmIdleValue(e.target.value)}
+                                    />
+                                    <select
+                                        className="border-none outline-none ts-13 text-[var(--c-text)] bg-transparent"
+                                        value={tmIdleUnit}
+                                        onChange={e => setTmIdleUnit(e.target.value as "minute" | "hour" | "day")}
+                                    >
+                                        <option value="minute">分钟</option>
+                                        <option value="hour">小时</option>
+                                        <option value="day">天</option>
+                                    </select>
+                                </div>
                             </div>
-                            <div className="menu-right flex items-center gap-1 ts-13">
-                                <input
-                                    type="number"
-                                    min={1}
-                                    className="w-[64px] text-right border-none outline-none ts-13 text-[var(--c-text)] bg-transparent"
-                                    value={tmIdleValue}
-                                    onChange={e => setTmIdleValue(e.target.value)}
-                                />
-                                <select
-                                    className="border-none outline-none ts-13 text-[var(--c-text)] bg-transparent"
-                                    value={tmIdleUnit}
-                                    onChange={e => setTmIdleUnit(e.target.value as "minute" | "hour" | "day")}
-                                >
-                                    <option value="minute">分钟</option>
-                                    <option value="hour">小时</option>
-                                    <option value="day">天</option>
-                                </select>
+                            <div className="menu-item">
+                                <div className="menu-label-group">
+                                    <span className="menu-label">醒来判断模型</span>
+                                    <span className="menu-desc">可选便宜模型；角色设定和记忆仍然相同</span>
+                                </div>
+                                <div className="menu-right">
+                                    <select
+                                        className="max-w-[190px] text-right border-none outline-none ts-13 text-[var(--c-text)] bg-transparent"
+                                        value={tmWakeApiConfigId}
+                                        onChange={e => setTmWakeApiConfigId(e.target.value)}
+                                    >
+                                        <option value="">跟随角色主模型</option>
+                                        {loadApiConfigs().map(config => (
+                                            <option key={config.id} value={config.id}>{config.name || config.provider} · {config.defaultModel}</option>
+                                        ))}
+                                    </select>
+                                </div>
                             </div>
-                        </div>
+                            <div className="menu-item">
+                                <div className="menu-label-group"><span className="menu-label">每日最多检查</span></div>
+                                <input type="number" min={1} max={96} className="w-[80px] text-right border-none outline-none ts-13 text-[var(--c-text)] bg-transparent" value={tmMaxChecks} onChange={e => setTmMaxChecks(e.target.value)} />
+                            </div>
+                            <div className="menu-item">
+                                <div className="menu-label-group"><span className="menu-label">每日最多发消息</span></div>
+                                <input type="number" min={1} max={20} className="w-[80px] text-right border-none outline-none ts-13 text-[var(--c-text)] bg-transparent" value={tmMaxMessages} onChange={e => setTmMaxMessages(e.target.value)} />
+                            </div>
+                            <div className="menu-item">
+                                <div className="menu-label-group">
+                                    <span className="menu-label">每日后台 Token 上限</span>
+                                    <span className="menu-desc">按输入输出字符保守估算，达到后当天停止</span>
+                                </div>
+                                <input type="number" min={1000} step={1000} className="w-[105px] text-right border-none outline-none ts-13 text-[var(--c-text)] bg-transparent" value={tmDailyTokenBudget} onChange={e => setTmDailyTokenBudget(e.target.value)} />
+                            </div>
+                        </>
                     )}
                     <div className="menu-item" style={{ alignItems: "stretch", flexDirection: "column", gap: 8 }}>
                         <button className="ui-btn ui-btn-soft-action w-full" onClick={tmMode === "idle" ? handleCreateIdleRule : handleCreateTimedMsg} disabled={tmBusy}>
@@ -1456,7 +1552,7 @@ function OfflinePushSettingsPage({ onBack }: { onBack: () => void }) {
                 </div>
                 <p className="menu-group-desc mx-2">
                     {tmHint || (tmMode === "idle"
-                        ? `你长时间不发消息时 TA 会主动来找你；不回复最多连发 ${IDLE_RECONNECT_MAX_CONSECUTIVE} 次，回复后重新开始计。每个角色一条规则。`
+                        ? `TA 会结合角色设定、最近聊天、长期记忆和当前时间自行判断；可以调用你在「角色工具」里允许自动醒来使用的工具，也可以只看看不发消息。无需设置固定安静时段。`
                         : "每个角色同时仅保留一条，新建会替换旧的。关掉后台由服务端接管生成并推送（需开启离线推送）。")}
                 </p>
 
@@ -1469,11 +1565,17 @@ function OfflinePushSettingsPage({ onBack }: { onBack: () => void }) {
                                 const hours = Math.floor(rule.intervalMinutes / 60);
                                 const minutes = rule.intervalMinutes % 60;
                                 const intervalLabel = `${hours ? `${hours}小时` : ""}${minutes ? `${minutes}分钟` : hours ? "" : "0分钟"}`;
+                                const usage = getIdleReconnectDailyUsage(rule);
+                                const limits = getIdleReconnectLimits(rule);
+                                const model = rule.wakeApiConfigId
+                                    ? loadApiConfigs().find(config => config.id === rule.wakeApiConfigId)
+                                    : undefined;
+                                const modelLabel = model ? (model.name || model.defaultModel) : "跟随主模型";
                                 return (
                                     <div key={rule.id} className="menu-item">
                                         <div className="menu-label-group" style={{ minWidth: 0, flex: 1 }}>
-                                            <span className="menu-label">{charName} · 沉默超过 {intervalLabel}（连发 {rule.consecutiveCount}/{IDLE_RECONNECT_MAX_CONSECUTIVE}）</span>
-                                            <span className="menu-desc" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>长时间没消息时主动来找你</span>
+                                            <span className="menu-label">{charName} · 每 {intervalLabel} 检查（已发 {rule.consecutiveCount}/{IDLE_RECONNECT_MAX_CONSECUTIVE}）</span>
+                                            <span className="menu-desc">{modelLabel} · 今日检查 {usage.checks}/{limits.maxChecksPerDay} · 发消息 {usage.messages}/{limits.maxMessagesPerDay} · 约 {usage.estimatedTokens}/{limits.dailyTokenBudget} Token</span>
                                         </div>
                                         <button className="ui-btn ui-btn-outline py-1 px-3 ts-12" style={{ whiteSpace: "nowrap", color: "var(--c-danger)" }} onClick={() => handleDeleteIdleRule(rule)}>删除</button>
                                     </div>

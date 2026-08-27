@@ -37,13 +37,14 @@ import { triggerDeleteFriendReaction } from "@/lib/friend-request-engine";
 import { loadCharacters } from "@/lib/character-storage";
 import { isAgentComputerConfigured } from "@/lib/agent-computer";
 import { CharacterComputerPage } from "./character-computer-page";
+import { CharacterToolsPage, getRoleToolChatEnabledCount } from "./character-tools-page";
 import { resolveUserIdentity, loadBindingConfig, loadPresets, resolveBinding } from "@/lib/settings-storage";
 import { getStatusRegionConfig, saveStatusRegionConfig, presetSupportsStatusRegion, isCustomStatusRegionActive, STATUS_REGION_SCHEME_TARGET, STATUS_REGION_UPDATED_EVENT, type StatusRegionConfig } from "@/lib/chat-status-region";
 import { downloadFile } from "@/lib/download-utils";
 import { getSchemes, saveScheme, deleteScheme, type CSSScheme } from "@/lib/css-scheme-storage";
 import { CustomStatusFrame } from "@/components/chat/custom-status-frame";
 import { KeyboardAutoSendDebounceItem } from "@/components/chat/keyboard-auto-send-debounce-item";
-import { ChevronRight, Image as ImageIcon, Video, Mic, UserMinus, UserPlus, Users, Pin, MessageSquare, Search, AlertCircle, Code, Laptop, Trash2, Smile, Sparkles, X, Play, Upload, Download, Save, FolderOpen, type LucideIcon } from "lucide-react";
+import { ChevronRight, Image as ImageIcon, Video, Mic, UserMinus, UserPlus, Users, Pin, MessageSquare, Search, AlertCircle, Code, Laptop, Trash2, Smile, Sparkles, X, Play, Upload, Download, Save, FolderOpen, Wrench, type LucideIcon } from "lucide-react";
 import { BINDING_ACCENTS, CONTENT_APP_ACCENTS } from "@/lib/ui-accent-colors";
 import CSSSchemeBar from "@/components/ui/css-scheme-picker";
 import { ConfirmDialog } from "@/components/ui/modal";
@@ -413,6 +414,8 @@ export function ChatSettingsPanel({
     const [showSearch, setShowSearch] = useState(false);
     // TA 的电脑：翻看角色云端电脑（连接了角色电脑才显示入口）
     const [showComputer, setShowComputer] = useState(false);
+    const [showCharacterTools, setShowCharacterTools] = useState(false);
+    const [roleToolCount, setRoleToolCount] = useState(() => session.isGroup ? 0 : getRoleToolChatEnabledCount(session.contactId));
     const [searchQuery, setSearchQuery] = useState("");
     const [submittedSearchQuery, setSubmittedSearchQuery] = useState("");
     const [searchHistoryMessages, setSearchHistoryMessages] = useState<ChatMessage[]>([]);
@@ -828,6 +831,19 @@ export function ChatSettingsPanel({
                         <div className="menu-label-group"><span className="menu-label">查找聊天记录</span></div>
                         <div className="menu-right"><ChevronRight size={16} /></div>
                     </button>
+                    {!session.isGroup && (
+                        <button className="menu-item" onClick={() => setShowCharacterTools(true)}>
+                            <ChatInfoIcon icon={Wrench} color={BINDING_ACCENTS.api} />
+                            <div className="menu-label-group">
+                                <span className="menu-label">角色工具</span>
+                                <span className="menu-desc">为这个角色单独授权工具和自动醒来权限</span>
+                            </div>
+                            <div className="menu-right">
+                                <span className="menu-desc mr-1">已开启 {roleToolCount} 个</span>
+                                <ChevronRight size={16} />
+                            </div>
+                        </button>
+                    )}
                     {!session.isGroup && isAgentComputerConfigured() && (
                         <button className="menu-item" onClick={() => setShowComputer(true)}>
                             <ChatInfoIcon icon={Laptop} color={BINDING_ACCENTS.memory} />
@@ -1487,6 +1503,15 @@ export function ChatSettingsPanel({
                     characterId={session.contactId}
                     characterName={characterName}
                     onClose={() => setShowComputer(false)}
+                />
+            )}
+
+            {showCharacterTools && !session.isGroup && (
+                <CharacterToolsPage
+                    characterId={session.contactId}
+                    characterName={characterName}
+                    onClose={() => setShowCharacterTools(false)}
+                    onCountChange={setRoleToolCount}
                 />
             )}
 
