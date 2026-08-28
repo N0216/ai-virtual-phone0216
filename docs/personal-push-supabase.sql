@@ -18,7 +18,8 @@ begin
         'ai_phone_cloud_meta',
         'push_server_config', 'push_subscriptions', 'push_jobs', 'push_outbox',
         'push_shortcut_commands', 'push_bridge_config', 'push_bridge_snapshots',
-        'push_screen_sessions', 'push_screen_threads'
+        'push_screen_sessions', 'push_screen_threads',
+        'role_chat_messages', 'role_handoffs', 'role_shared_memories'
       ])
   ) into has_unknown_public_table;
 
@@ -34,7 +35,7 @@ create table if not exists public.ai_phone_cloud_meta (
   updated_at timestamptz not null default now()
 );
 insert into public.ai_phone_cloud_meta (id, schema_version, updated_at)
-values ('personal-cloud', 3, now())
+values ('personal-cloud', 4, now())
 on conflict (id) do update set schema_version = excluded.schema_version, updated_at = excluded.updated_at;
 
 create table if not exists public.push_server_config (
@@ -49,6 +50,67 @@ create table if not exists public.push_server_config (
 alter table public.push_server_config add column if not exists cron_secret text;
 alter table public.push_server_config add column if not exists payload_key text;
 alter table public.push_server_config add column if not exists site_origin text;
+alter table public.push_server_config add column if not exists role_memory_token text;
+
+-- 官 G 与小手机共用的角色上下文。三类数据彼此分开，并且每行都绑定 role_id，
+-- 因此不同角色、群聊和会话不会串在一起。
+create table if not exists public.role_chat_messages (
+  user_id text not null,
+  role_id text not null,
+  role_name text,
+  session_id text not null,
+  message_id text not null,
+  speaker text not null,
+  content text not null,
+  source text not null default 'phone',
+  message_order double precision,
+  metadata jsonb not null default '{}'::jsonb,
+  message_at timestamptz not null,
+  updated_at timestamptz not null default now(),
+  primary key (user_id, role_id, message_id),
+  constraint role_chat_messages_speaker_check check (speaker in ('user', 'assistant', 'system')),
+  constraint role_chat_messages_source_check check (source in ('phone', 'official_g', 'import'))
+);
+create index if not exists role_chat_messages_recent_idx
+  on public.role_chat_messages (user_id, role_id, message_at desc);
+create index if not exists role_chat_messages_session_idx
+  on public.role_chat_messages (user_id, role_id, session_id, message_at desc);
+
+create table if not exists public.role_handoffs (
+  id text primary key,
+  user_id text not null,
+  role_id text not null,
+  role_name text,
+  source text not null default 'official_g',
+  summary text not null,
+  recent_context jsonb not null default '[]'::jsonb,
+  important_facts jsonb not null default '[]'::jsonb,
+  open_topics jsonb not null default '[]'::jsonb,
+  last_chat_at timestamptz,
+  created_at timestamptz not null default now(),
+  constraint role_handoffs_source_check check (source in ('phone', 'official_g', 'import'))
+);
+create index if not exists role_handoffs_recent_idx
+  on public.role_handoffs (user_id, role_id, created_at desc);
+
+create table if not exists public.role_shared_memories (
+  id text primary key,
+  user_id text not null,
+  role_id text not null,
+  role_name text,
+  content text not null,
+  importance integer not null default 3,
+  source text not null default 'phone',
+  status text not null default 'active',
+  metadata jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint role_shared_memories_importance_check check (importance between 1 and 5),
+  constraint role_shared_memories_source_check check (source in ('phone', 'official_g', 'import')),
+  constraint role_shared_memories_status_check check (status in ('active', 'archived'))
+);
+create index if not exists role_shared_memories_recent_idx
+  on public.role_shared_memories (user_id, role_id, status, updated_at desc);
 
 create table if not exists public.push_subscriptions (
   endpoint text primary key,
@@ -296,9 +358,15 @@ alter table public.push_shortcut_commands enable row level security;
 alter table public.push_bridge_config enable row level security;
 alter table public.push_bridge_snapshots enable row level security;
 alter table public.push_screen_threads enable row level security;
+alter table public.role_chat_messages enable row level security;
+alter table public.role_handoffs enable row level security;
+alter table public.role_shared_memories enable row level security;
 
 -- 屏幕速聊表和 RPC 只由 Edge Function 的 service_role 使用；客户端角色没有表级权限。
 revoke all on table public.push_screen_threads from public, anon, authenticated;
+revoke all on table public.role_chat_messages from public, anon, authenticated;
+revoke all on table public.role_handoffs from public, anon, authenticated;
+revoke all on table public.role_shared_memories from public, anon, authenticated;
 
 -- 2026 年起新项目不会自动把 public 新表暴露给 Data API。
 -- 网关和生成器只以 service_role 访问，绝不授予 anon 或 authenticated。
@@ -312,7 +380,10 @@ grant select, insert, update, delete on table
   public.push_shortcut_commands,
   public.push_bridge_config,
   public.push_bridge_snapshots,
-  public.push_screen_threads
+  public.push_screen_threads,
+  public.role_chat_messages,
+  public.role_handoffs,
+  public.role_shared_memories
 to service_role;
 
 revoke all on function public.ai_phone_screen_chat_begin(text, text, text, text, integer) from public, anon, authenticated;
