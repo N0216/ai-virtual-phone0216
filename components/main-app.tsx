@@ -5,6 +5,7 @@ import { ArrowRight } from "lucide-react";
 
 import { AccountGate } from "@/components/auth/account-gate";
 import { CloudBackupScheduler } from "@/components/cloud-backup-scheduler";
+import { RoleMemorySyncScheduler } from "@/components/role-memory-sync-scheduler";
 import { RealityBridgeScheduler } from "@/components/reality-bridge-scheduler";
 import { MediaMaintenanceScheduler } from "@/components/media-maintenance-scheduler";
 import { DesktopShell } from "./desktop-shell";
@@ -289,6 +290,7 @@ export function MainApp() {
             />
             <OfflinePushRevampAnnouncement />
             <CloudBackupScheduler />
+            <RoleMemorySyncScheduler />
             <RealityBridgeScheduler />
             <MediaMaintenanceScheduler />
           </MusicProvider>

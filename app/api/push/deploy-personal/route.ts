@@ -8,6 +8,7 @@ const GENERATE_SLUG = "push-generate";
 const RESULT_SLUG = "push-shortcut-result";
 const BRIDGE_SLUG = "push-bridge";
 const SCREEN_SLUG = "screen-chat";
+const ROLE_MEMORY_MCP_SLUG = "role-memory-mcp";
 
 type DeployRequest = {
   projectRef?: string;
@@ -17,6 +18,7 @@ type DeployRequest = {
   resultCode?: string;
   bridgeCode?: string;
   screenChatCode?: string;
+  roleMemoryMcpCode?: string;
   schemaSql?: string;
 };
 
@@ -70,7 +72,8 @@ async function assertDedicatedProject(params: {
             and c.relname <> all (array[
               'push_server_config', 'push_subscriptions', 'push_jobs', 'push_outbox',
               'push_shortcut_commands', 'push_bridge_config', 'push_bridge_snapshots',
-              'push_screen_sessions', 'push_screen_threads'
+              'push_screen_sessions', 'push_screen_threads',
+              'role_chat_messages', 'role_handoffs', 'role_shared_memories'
             ])
         ) then 'personal-cloud-safe-v2'
         else 'shared-project-blocked'
@@ -114,6 +117,7 @@ export async function POST(request: Request) {
   const resultCode = typeof payload.resultCode === "string" ? payload.resultCode : "";
   const bridgeCode = typeof payload.bridgeCode === "string" ? payload.bridgeCode : "";
   const screenChatCode = typeof payload.screenChatCode === "string" ? payload.screenChatCode : "";
+  const roleMemoryMcpCode = typeof payload.roleMemoryMcpCode === "string" ? payload.roleMemoryMcpCode : "";
   const schemaSql = typeof payload.schemaSql === "string" ? payload.schemaSql : "";
 
   if (!/^[a-z0-9]{15,40}$/.test(projectRef)) {
@@ -156,6 +160,13 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: false, error: "屏幕速聊入口部署包无效。" }, { status: 400 });
   }
   if (
+    !roleMemoryMcpCode.includes("角色记忆交接 MCP")
+    || !roleMemoryMcpCode.includes("Deno.serve")
+    || roleMemoryMcpCode.length > 600_000
+  ) {
+    return NextResponse.json({ ok: false, error: "角色记忆 MCP 部署包无效。" }, { status: 400 });
+  }
+  if (
     !schemaSql.startsWith("-- ai-phone-personal-push-schema-v1")
     || !schemaSql.includes("create table if not exists public.push_jobs")
     || !schemaSql.includes("__PROJECT_REF__")
@@ -172,6 +183,24 @@ export async function POST(request: Request) {
       return NextResponse.json(
         { ok: false, step: "检查独立项目失败", error: dedicatedProject.error },
         { status: dedicatedProject.status },
+      );
+    }
+
+    // 数据库升级全部为向后兼容的新增项。先升级表，再替换函数，避免新网关在
+    // role_memory_token 字段尚未创建的几秒内影响原有离线推送。
+    const query = schemaSql.replaceAll("__PROJECT_REF__", projectRef);
+    const database = await fetch(`https://api.supabase.com/v1/projects/${projectRef}/database/query`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ query, read_only: false }),
+    });
+    if (!database.ok) {
+      return NextResponse.json(
+        { ok: false, step: "初始化离线推送数据库失败", error: await upstreamMessage(database) },
+        { status: database.status },
       );
     }
 
@@ -215,19 +244,16 @@ export async function POST(request: Request) {
       );
     }
 
-    const query = schemaSql.replaceAll("__PROJECT_REF__", projectRef);
-    const database = await fetch(`https://api.supabase.com/v1/projects/${projectRef}/database/query`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ query, read_only: false }),
+    const roleMemoryMcp = await deployFunction({
+      projectRef,
+      token,
+      slug: ROLE_MEMORY_MCP_SLUG,
+      code: roleMemoryMcpCode,
     });
-    if (!database.ok) {
+    if (!roleMemoryMcp.ok) {
       return NextResponse.json(
-        { ok: false, step: "初始化离线推送数据库失败", error: await upstreamMessage(database) },
-        { status: database.status },
+        { ok: false, step: "部署角色记忆 MCP 失败", error: await upstreamMessage(roleMemoryMcp) },
+        { status: roleMemoryMcp.status },
       );
     }
 

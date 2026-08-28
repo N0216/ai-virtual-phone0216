@@ -29,6 +29,7 @@ type PushConfigRow = {
   cron_secret: string | null;
   payload_key: string | null;
   site_origin: string | null;
+  role_memory_token: string | null;
 };
 type EncryptedPayload = { v: 1; iv: string; tag: string; ct: string };
 
@@ -61,6 +62,13 @@ function json(data: unknown, status = 200): Response {
 
 function cleanText(value: unknown, max: number): string {
   return typeof value === "string" ? value.trim().slice(0, max) : "";
+}
+
+function redactLikelyCredential(value: string): string {
+  return value
+    .replace(/\bsbp_[A-Za-z0-9_-]{20,}\b/g, "[已隐藏 Supabase 令牌]")
+    .replace(/\bsk-[A-Za-z0-9_-]{20,}\b/g, "[已隐藏 API 密钥]")
+    .replace(/\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b/g, "[已隐藏访问令牌]");
 }
 
 function randomHex(size: number): string {
@@ -307,12 +315,13 @@ Deno.serve(async (request: Request) => {
 
   const loadConfig = async (): Promise<PushConfigRow> => {
     const current = await readJson<PushConfigRow[]>(await rest(
-      "push_server_config?id=eq.main&select=vapid_public_key,vapid_private_key,cron_secret,payload_key,site_origin&limit=1",
+      "push_server_config?id=eq.main&select=vapid_public_key,vapid_private_key,cron_secret,payload_key,site_origin,role_memory_token&limit=1",
     ));
     if (current[0]) {
       const patch: Record<string, string> = {};
       if (!current[0].cron_secret) patch.cron_secret = randomHex(24);
       if (!current[0].payload_key) patch.payload_key = randomHex(32);
+      if (!current[0].role_memory_token) patch.role_memory_token = randomHex(32);
       if (siteOrigin && current[0].site_origin !== siteOrigin) patch.site_origin = siteOrigin;
       if (Object.keys(patch).length > 0) {
         await readJson(await rest("push_server_config?id=eq.main", {
@@ -342,11 +351,12 @@ Deno.serve(async (request: Request) => {
         vapid_private_key: privateJwk.d,
         cron_secret: randomHex(24),
         payload_key: randomHex(32),
+        role_memory_token: randomHex(32),
         site_origin: siteOrigin || null,
       }]),
     }));
     const created = await readJson<PushConfigRow[]>(await rest(
-      "push_server_config?id=eq.main&select=vapid_public_key,vapid_private_key,cron_secret,payload_key,site_origin&limit=1",
+      "push_server_config?id=eq.main&select=vapid_public_key,vapid_private_key,cron_secret,payload_key,site_origin,role_memory_token&limit=1",
     ));
     if (!created[0]) throw new Error("推送配置初始化失败。");
     return created[0];
@@ -564,8 +574,140 @@ Deno.serve(async (request: Request) => {
         service: "ai-phone-personal-push",
         version: 2,
         schemaVersion,
-        capabilities: schemaVersion >= 3 ? ["screen-chat-continuous"] : [],
+        capabilities: [
+          ...(schemaVersion >= 3 ? ["screen-chat-continuous"] : []),
+          ...(schemaVersion >= 4 ? ["role-memory-sync", "role-memory-mcp"] : []),
+        ],
       });
+    }
+
+    if (action === "role-memory-access" && request.method === "GET") {
+      const config = await loadConfig();
+      if (!config.role_memory_token) throw new Error("角色记忆访问令牌初始化失败。");
+      return json({
+        ok: true,
+        mcpUrl: `${supabaseUrl}/functions/v1/role-memory-mcp`,
+        token: config.role_memory_token,
+      });
+    }
+
+    if (action === "role-context" && request.method === "GET") {
+      const roleId = cleanText(url.searchParams.get("roleId"), 160);
+      if (!roleId) return json({ ok: false, error: "缺少角色 ID。" }, 400);
+      const [handoffs, memories, officialMessages] = await Promise.all([
+        readJson<unknown[]>(await rest(
+          `role_handoffs?user_id=eq.${OWNER_ID}&role_id=eq.${encodeURIComponent(roleId)}`
+          + "&select=id,role_id,role_name,source,summary,recent_context,important_facts,open_topics,last_chat_at,created_at"
+          + "&order=created_at.desc&limit=1",
+        )),
+        readJson<unknown[]>(await rest(
+          `role_shared_memories?user_id=eq.${OWNER_ID}&role_id=eq.${encodeURIComponent(roleId)}&status=eq.active`
+          + "&select=id,role_id,role_name,content,importance,source,metadata,created_at,updated_at"
+          + "&order=importance.desc,updated_at.desc&limit=80",
+        )),
+        readJson<unknown[]>(await rest(
+          `role_chat_messages?user_id=eq.${OWNER_ID}&role_id=eq.${encodeURIComponent(roleId)}&source=eq.official_g`
+          + "&select=session_id,message_id,speaker,content,message_at"
+          + "&order=message_at.desc&limit=60",
+        )),
+      ]);
+      return json({ ok: true, handoff: handoffs[0] || null, memories, officialMessages: officialMessages.reverse() });
+    }
+
+    if (action === "role-messages-sync" && request.method === "POST") {
+      const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+      const rawUpserts = Array.isArray(body.upserts) ? body.upserts.slice(0, 120) : [];
+      const upserts = rawUpserts.map(value => value && typeof value === "object" ? value as Record<string, unknown> : {})
+        .map(value => {
+          const roleId = cleanText(value.roleId, 160);
+          const sessionId = cleanText(value.sessionId, 180);
+          const messageId = cleanText(value.messageId, 180);
+          const speaker = cleanText(value.speaker, 20);
+          const messageAt = cleanText(value.messageAt, 40);
+          if (!roleId || !sessionId || !messageId || !["user", "assistant", "system"].includes(speaker)) return null;
+          if (!Number.isFinite(Date.parse(messageAt))) return null;
+          return {
+            user_id: OWNER_ID,
+            role_id: roleId,
+            role_name: cleanText(value.roleName, 120) || null,
+            session_id: sessionId,
+            message_id: messageId,
+            speaker,
+            content: redactLikelyCredential(cleanText(value.content, 50_000)),
+            source: "phone",
+            message_order: Number.isFinite(Number(value.messageOrder)) ? Number(value.messageOrder) : null,
+            metadata: value.metadata && typeof value.metadata === "object" && !Array.isArray(value.metadata) ? value.metadata : {},
+            message_at: new Date(messageAt).toISOString(),
+            updated_at: new Date().toISOString(),
+          };
+        })
+        .filter((value): value is NonNullable<typeof value> => value !== null);
+
+      if (JSON.stringify(upserts).length > 900_000) return json({ ok: false, error: "同步消息过大。" }, 413);
+      if (upserts.length > 0) {
+        await readJson(await rest("role_chat_messages?on_conflict=user_id,role_id,message_id", {
+          method: "POST",
+          headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+          body: JSON.stringify(upserts),
+        }));
+      }
+
+      const deletes = (Array.isArray(body.deletes) ? body.deletes : []).slice(0, 240)
+        .map(value => value && typeof value === "object" ? value as Record<string, unknown> : {})
+        .map(value => ({ roleId: cleanText(value.roleId, 160), messageId: cleanText(value.messageId, 180) }))
+        .filter(value => value.roleId && value.messageId);
+      for (const entry of deletes) {
+        await readJson(await rest(
+          `role_chat_messages?user_id=eq.${OWNER_ID}&role_id=eq.${encodeURIComponent(entry.roleId)}`
+          + `&message_id=eq.${encodeURIComponent(entry.messageId)}`,
+          { method: "DELETE", headers: { Prefer: "return=minimal" } },
+        ));
+      }
+      return json({ ok: true, upserted: upserts.length, deleted: deletes.length });
+    }
+
+    if (action === "role-local-memories-sync" && request.method === "POST") {
+      const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+      const roleId = cleanText(body.roleId, 160);
+      if (!roleId) return json({ ok: false, error: "缺少角色 ID。" }, 400);
+      const entries = (Array.isArray(body.entries) ? body.entries : []).slice(0, 600)
+        .map(value => value && typeof value === "object" ? value as Record<string, unknown> : {})
+        .map(value => {
+          const localId = cleanText(value.id, 180);
+          const content = redactLikelyCredential(cleanText(value.content, 30_000));
+          if (!localId || !content) return null;
+          return {
+            id: `phone_${localId}`,
+            user_id: OWNER_ID,
+            role_id: roleId,
+            role_name: cleanText(body.roleName, 120) || null,
+            content,
+            importance: Math.max(1, Math.min(5, Number(value.importance) || 3)),
+            source: "phone",
+            status: "active",
+            metadata: value.metadata && typeof value.metadata === "object" && !Array.isArray(value.metadata) ? value.metadata : {},
+            created_at: cleanText(value.createdAt, 40) || new Date().toISOString(),
+            updated_at: cleanText(value.updatedAt, 40) || new Date().toISOString(),
+          };
+        }).filter((value): value is NonNullable<typeof value> => value !== null);
+      if (JSON.stringify(entries).length > 900_000) return json({ ok: false, error: "同步记忆过大。" }, 413);
+      if (entries.length > 0) {
+        await readJson(await rest("role_shared_memories?on_conflict=id", {
+          method: "POST",
+          headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+          body: JSON.stringify(entries),
+        }));
+      }
+      const deletedIds = (Array.isArray(body.deletedIds) ? body.deletedIds : [])
+        .map(value => cleanText(value, 180)).filter(Boolean).slice(0, 600);
+      for (const localId of deletedIds) {
+        await readJson(await rest(
+          `role_shared_memories?id=eq.${encodeURIComponent(`phone_${localId}`)}`
+          + `&user_id=eq.${OWNER_ID}&role_id=eq.${encodeURIComponent(roleId)}&source=eq.phone`,
+          { method: "DELETE", headers: { Prefer: "return=minimal" } },
+        ));
+      }
+      return json({ ok: true, upserted: entries.length, deleted: deletedIds.length });
     }
 
     if (action === "public-key" && request.method === "GET") {
