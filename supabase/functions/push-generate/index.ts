@@ -188,6 +188,13 @@ function stripBracketBlock(text: string, tag: string): string {
   return text.replace(new RegExp(`\\[${escaped}\\]([\\s\\S]*?)\\[\\/${escaped}\\]`, "g"), "");
 }
 
+function stripInnerMonologue(text: string): string {
+  const family = "内心|内心独白|心声";
+  return text
+    .replace(new RegExp(`\\[(?:${family})\\][\\s\\S]*?\\[\\/(?:${family})\\]`, "gi"), "")
+    .replace(new RegExp(`\\[(?:${family})\\]\\s*[\\s\\S]*?(?=\\n\\s*\\n|$)`, "gi"), "");
+}
+
 function humanizeSegment(segment: string): string {
   const marker = segment.match(/^\[([^\][：:]{1,12})[：:]([\s\S]*?)\]$/);
   if (!marker) return segment;
@@ -207,7 +214,7 @@ function humanizeSegment(segment: string): string {
 function splitResponseForPushPreview(rawText: string): string[] {
   let text = stripStateValues(rawText);
   text = stripBracketBlock(text, "状态栏");
-  text = stripBracketBlock(text, "内心");
+  text = stripInnerMonologue(text);
   text = text.replace(/\n{3,}/g, "\n\n").trim();
   return text
     .split(/\n\n+/)
@@ -284,6 +291,7 @@ type JobPayload = {
     resultMarker: string;
     imageMarker?: string;
   };
+  mobileDaddyWakeContext?: { url: string; token: string };
   merge?: Record<string, unknown> & { sessionId?: string };
 };
 
@@ -351,6 +359,246 @@ function replaceMarker(value: unknown, marker: string, replacement: string): boo
     }
   }
   return replaced;
+}
+
+const TEMPORAL_AWARENESS_PATTERN = /<temporal_awareness\b([^>]*)>[\s\S]*?<\/temporal_awareness>/g;
+
+function readTemporalAttributes(raw: string): Record<string, string> {
+  const attributes: Record<string, string> = {};
+  for (const match of raw.matchAll(/([a-z_]+)="([^"]*)"/g)) {
+    attributes[match[1]] = match[2]
+      .replace(/&quot;/g, '"')
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&amp;/g, "&");
+  }
+  return attributes;
+}
+
+function safeTimeZone(value: string | undefined, fallback = "UTC"): string {
+  if (!value) return fallback;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value }).format(new Date(0));
+    return value;
+  } catch {
+    return fallback;
+  }
+}
+
+function temporalDateParts(date: Date, timeZone: string): Record<string, string> {
+  const values: Record<string, string> = {};
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
+  for (const part of formatter.formatToParts(date)) {
+    if (["year", "month", "day", "hour", "minute"].includes(part.type)) values[part.type] = part.value;
+  }
+  return values;
+}
+
+function temporalDateTime(date: Date, timeZone: string): string {
+  const p = temporalDateParts(date, timeZone);
+  return `${Number(p.year)}年${Number(p.month)}月${Number(p.day)}日${p.hour}:${p.minute}`;
+}
+
+function temporalDateKey(date: Date, timeZone: string): string {
+  const p = temporalDateParts(date, timeZone);
+  return `${p.year}-${p.month}-${p.day}`;
+}
+
+function temporalWeekday(date: Date, timeZone: string): string {
+  return new Intl.DateTimeFormat("zh-CN", { timeZone, weekday: "long" }).format(date);
+}
+
+function temporalDayPart(date: Date, timeZone: string): string {
+  const hour = Number(temporalDateParts(date, timeZone).hour);
+  if (hour < 5) return "凌晨";
+  if (hour < 8) return "清晨";
+  if (hour < 12) return "上午";
+  if (hour < 14) return "中午";
+  if (hour < 18) return "下午";
+  if (hour < 22) return "晚上";
+  return "深夜";
+}
+
+function temporalElapsed(iso: string | undefined, now: Date): string | null {
+  if (!iso) return null;
+  const then = new Date(iso);
+  if (!Number.isFinite(then.getTime())) return null;
+  const seconds = Math.max(0, Math.floor((now.getTime() - then.getTime()) / 1000));
+  if (seconds < 45) return "刚刚";
+  if (seconds < 3600) return `${Math.max(1, Math.round(seconds / 60))}分钟前`;
+  if (seconds < 86400) {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    return minutes >= 10 ? `${hours}小时${minutes}分钟前` : `${hours}小时前`;
+  }
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  return hours >= 2 ? `${days}天${hours}小时前` : `${days}天前`;
+}
+
+function readGroupTimeZones(value: string | undefined): Array<{ name: string; timeZone?: string | null }> {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(decodeURIComponent(value));
+    return Array.isArray(parsed) ? parsed.filter(item => item && typeof item.name === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function buildFreshTemporalBlock(attributeText: string, now: Date): string {
+  const attrs = readTemporalAttributes(attributeText);
+  const systemTimeZone = safeTimeZone(attrs.system_time_zone);
+  const characterTimeZone = safeTimeZone(attrs.character_time_zone, systemTimeZone);
+  const rows = [
+    `当前系统时间：${temporalDateTime(now, systemTimeZone)} ${systemTimeZone}，${temporalWeekday(now, systemTimeZone)}（${temporalDayPart(now, systemTimeZone)}）`,
+  ];
+  if (characterTimeZone !== systemTimeZone) {
+    rows.push(`角色本地时间：${temporalDateTime(now, characterTimeZone)} ${characterTimeZone}，${temporalWeekday(now, characterTimeZone)}（${temporalDayPart(now, characterTimeZone)}）`);
+    rows.push("判断角色作息、问候、深夜/清晨/工作时间时，优先使用角色本地时间。");
+  }
+  const groupMembers = readGroupTimeZones(attrs.group_time_zones);
+  const groupRows = groupMembers.flatMap(member => {
+    const zone = safeTimeZone(typeof member.timeZone === "string" ? member.timeZone : "", systemTimeZone);
+    if (zone === systemTimeZone) return [];
+    return [`${member.name}：${temporalDateTime(now, zone)} ${zone}，${temporalWeekday(now, zone)}（${temporalDayPart(now, zone)}）`];
+  });
+  if (groupRows.length > 0) {
+    rows.push("群成员本地时间：", ...groupRows);
+    rows.push("判断每个角色作息、问候、深夜/清晨/工作时间时，优先使用该角色自己的本地时间。");
+  }
+  const lastUserElapsed = temporalElapsed(attrs.last_user_at, now);
+  const lastAssistantElapsed = temporalElapsed(attrs.last_assistant_at, now);
+  const latestElapsed = temporalElapsed(attrs.latest_at, now);
+  if (lastUserElapsed) rows.push(`用户最近一条消息：${lastUserElapsed}`);
+  if (lastAssistantElapsed) rows.push(`你最近一条回复：${lastAssistantElapsed}`);
+  if (latestElapsed) rows.push(`最近一次真实聊天活动：${latestElapsed}`);
+
+  const latest = attrs.latest_at ? new Date(attrs.latest_at) : null;
+  const previous = attrs.previous_at ? new Date(attrs.previous_at) : null;
+  if (latest && previous && Number.isFinite(latest.getTime()) && Number.isFinite(previous.getTime())) {
+    const gap = temporalElapsed(previous.toISOString(), latest);
+    if (latest.getTime() - previous.getTime() >= 30 * 60 * 1000 && gap) rows.push(`最近两次真实聊天活动相隔：${gap}`);
+    if (temporalDateKey(previous, characterTimeZone) !== temporalDateKey(latest, characterTimeZone)) {
+      rows.push("最近两次真实聊天活动已经跨日，不要把之前那次误称为“刚刚”。");
+    }
+  }
+  if (latest && Number.isFinite(latest.getTime()) && temporalDateKey(latest, characterTimeZone) !== temporalDateKey(now, characterTimeZone)) {
+    rows.push("最近一次真实聊天活动与现在不在同一天，请正确使用“昨天/前天/几天前”等措辞。");
+  }
+  rows.push("这些是系统在离线任务真正执行时重新计算的时间事实。请自然体现在作息、问候、等待感和措辞中；不要机械报时或复述本段，也不要假装用户刚刚发过消息。");
+  return `<temporal_awareness${attributeText}>\n${rows.join("\n")}\n</temporal_awareness>`;
+}
+
+function refreshTemporalAwareness(value: unknown, now = new Date()): void {
+  if (!value || typeof value !== "object") return;
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      if (typeof value[index] === "string") {
+        value[index] = value[index].replace(TEMPORAL_AWARENESS_PATTERN, (_match, attrs: string) => buildFreshTemporalBlock(attrs, now));
+      } else {
+        refreshTemporalAwareness(value[index], now);
+      }
+    }
+    return;
+  }
+  const record = value as Record<string, unknown>;
+  for (const [key, item] of Object.entries(record)) {
+    if (typeof item === "string") {
+      record[key] = item.replace(TEMPORAL_AWARENESS_PATTERN, (_match, attrs: string) => buildFreshTemporalBlock(attrs, now));
+    } else {
+      refreshTemporalAwareness(item, now);
+    }
+  }
+}
+
+const MOBILE_DADDY_WAKE_CONTEXT_PATTERN = /<mobile_daddy_wake_context\b[^>]*>[\s\S]*?<\/mobile_daddy_wake_context>/g;
+
+function replaceMobileDaddyWakeContext(value: unknown, replacement: string): void {
+  if (!value || typeof value !== "object") return;
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      if (typeof value[index] === "string") {
+        value[index] = value[index].replace(MOBILE_DADDY_WAKE_CONTEXT_PATTERN, replacement);
+      } else {
+        replaceMobileDaddyWakeContext(value[index], replacement);
+      }
+    }
+    return;
+  }
+  const record = value as Record<string, unknown>;
+  for (const [key, item] of Object.entries(record)) {
+    if (typeof item === "string") {
+      record[key] = item.replace(MOBILE_DADDY_WAKE_CONTEXT_PATTERN, replacement);
+    } else {
+      replaceMobileDaddyWakeContext(item, replacement);
+    }
+  }
+}
+
+function safeWakeContextUrl(raw: string): URL | null {
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "https:" || url.username || url.password) return null;
+    const hostname = url.hostname.toLowerCase();
+    if (
+      hostname === "localhost"
+      || hostname.endsWith(".local")
+      || hostname === "127.0.0.1"
+      || hostname === "::1"
+      || /^10\./u.test(hostname)
+      || /^192\.168\./u.test(hostname)
+      || /^172\.(?:1[6-9]|2\d|3[01])\./u.test(hostname)
+    ) return null;
+    return url.pathname.endsWith("/wake-context") ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchFreshMobileDaddyWakeContext(
+  access: NonNullable<JobPayload["mobileDaddyWakeContext"]>,
+): Promise<string> {
+  const url = safeWakeContextUrl(access.url);
+  if (!url || !access.token || access.token.length > 512) {
+    return '<mobile_daddy_wake_context status="unavailable">\n云端兜底未取得有效的最近关系与事件上下文。不要假装已经读取成功。\n</mobile_daddy_wake_context>';
+  }
+  url.searchParams.set("handoff_limit", "1");
+  url.searchParams.set("conversation_limit", "1");
+  url.searchParams.set("message_limit", "30");
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const response = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${access.token.replace(/^bearer\s+/iu, "")}`,
+        Accept: "application/json",
+      },
+      signal: controller.signal,
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok || !data) throw new Error(`wake context HTTP ${response.status}`);
+    const bounded = JSON.stringify(data).slice(0, 100_000);
+    return [
+      '<mobile_daddy_wake_context status="fresh">',
+      "以下内容在离线任务真正执行时按权限重新读取。关系状态主要依据最近交接、聊天原文、相关长期记忆和允许读取的 Self Memory 判断；时间只辅助判断间隔和事件新旧，不能单独判断关系。",
+      bounded,
+      "信息不足时才继续按需检索，不要读取全部历史。",
+      "</mobile_daddy_wake_context>",
+    ].join("\n");
+  } catch {
+    return '<mobile_daddy_wake_context status="unavailable">\n云端兜底刷新最近关系与事件上下文失败。不要假装已经读取成功。\n</mobile_daddy_wake_context>';
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -556,6 +804,23 @@ Deno.serve(async (req: Request) => {
       return;
     }
 
+    // A worker can be reset from "running" to "pending" after a platform
+    // timeout. If its previous attempt already reached the outbox, replaying
+    // the LLM and push would duplicate the same active message. The outbox id
+    // is deterministic per job, so an already-produced job is complete even
+    // when the final status update was interrupted.
+    const deterministicOutboxId = `out_${job.id}`;
+    const existingOutboxResponse = await rest(
+      `push_outbox?id=eq.${encodeURIComponent(deterministicOutboxId)}&user_id=eq.${encodeURIComponent(job.user_id)}&select=id&limit=1`,
+    );
+    const existingOutboxRows = existingOutboxResponse.ok
+      ? await existingOutboxResponse.json() as Array<{ id: string }>
+      : [];
+    if (existingOutboxRows.length > 0) {
+      await finish("done", "outbox already exists; duplicate retry skipped");
+      return;
+    }
+
     // 硬闸：每账号每天最多 50 条服务端兜底生成，超出只存任务记录不烧 token。
     // 只统计 push-generate 真正生成的回箱行，不让现实桥的纯存档行占用额度。
     const dayStart = `${new Date().toISOString().slice(0, 10)}T00:00:00Z`;
@@ -566,6 +831,16 @@ Deno.serve(async (req: Request) => {
     if (todayRows.length >= DAILY_GENERATION_CAP) {
       await finish("done", `daily cap (${DAILY_GENERATION_CAP}) reached`);
       return;
+    }
+
+    // The client arms offline jobs ahead of time. Refresh the authoritative time
+    // block at actual execution so delayed and repeated wake-ups never reuse the
+    // booking-time clock snapshot.
+    refreshTemporalAwareness(payload.request.body, new Date());
+    if (payload.mobileDaddyWakeContext) {
+      await progress("refreshing mobile_daddy wake context");
+      const freshWakeContext = await fetchFreshMobileDaddyWakeContext(payload.mobileDaddyWakeContext);
+      replaceMobileDaddyWakeContext(payload.request.body, freshWakeContext);
     }
 
     await progress("llm request started");
@@ -832,16 +1107,24 @@ Deno.serve(async (req: Request) => {
     }
 
     await progress(`llm ok, ${rawText.length} chars${deliverAsCall ? ", call" : ""}`);
+    const visiblePushParts = deliverAsCall ? ["来电话了…"] : splitResponseForPushPreview(rawText).slice(0, 6);
+    const silentDecision = !deliverAsCall && visiblePushParts.length === 0;
     const outboxResponse = await rest("push_outbox", {
       method: "POST",
+      headers: { Prefer: "resolution=ignore-duplicates,return=representation" },
       body: JSON.stringify([{
-        id: `out_${crypto.randomUUID()}`,
+        id: deterministicOutboxId,
         user_id: job.user_id,
         job_id: job.id,
         session_id: payload.merge?.sessionId ?? null,
         trigger_key: job.trigger_key,
         raw_text: rawText,
-        meta: { ...(payload.merge ?? {}), pushGenerated: true },
+        meta: {
+          ...(payload.merge ?? {}),
+          pushGenerated: true,
+          decision: silentDecision ? "silent" : "sent",
+          ...(shortcutActionNote ? { shortcutActionNote } : {}),
+        },
       }]),
     });
     if (!outboxResponse.ok) {
@@ -856,6 +1139,20 @@ Deno.serve(async (req: Request) => {
         method: "DELETE",
         headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
       }).catch(() => undefined);
+    }
+
+    // A state/inner-monologue-only response still belongs in the outbox so the
+    // client can merge its private state, but it must not create a fake chat
+    // message, unread badge, or system notification.
+    if (silentDecision) {
+      await deliverDeferredShortcut();
+      await finish("done", "silent decision, outbox written without push");
+      return;
+    }
+    const insertedOutboxRows = await outboxResponse.json().catch(() => []) as Array<{ id?: string }>;
+    if (insertedOutboxRows.length === 0) {
+      await finish("done", "outbox won concurrent retry; duplicate push skipped");
+      return;
     }
 
     const vapidResponse = await rest("push_server_config?id=eq.main&select=vapid_public_key,vapid_private_key&limit=1");
@@ -877,10 +1174,7 @@ Deno.serve(async (req: Request) => {
     const targetUrl = deliverAsCall && callSessionId
       ? `/?ring=${encodeURIComponent(callSessionId)}&rt=${Date.now()}`
       : (payload.notify?.url || "/");
-    let parts = deliverAsCall
-      ? ["来电话了…"]
-      : splitResponseForPushPreview(rawText).slice(0, 6);
-    if (parts.length === 0) parts = ["发来一条消息"];
+    const parts = visiblePushParts;
 
     for (let index = 0; index < parts.length; index += 1) {
       if (index > 0) await sleep(500);

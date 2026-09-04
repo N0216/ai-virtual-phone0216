@@ -1,5 +1,6 @@
 import { DATA_MODULES } from "./data-management/modules";
 import type { DataModuleDefinition, IndexedDbSource, KvSource, LocalStorageSource } from "./data-management/types";
+import { redactSensitiveLogText } from "./log-redaction";
 
 export type LocalDataListInput = {
     path?: string;
@@ -237,7 +238,15 @@ function tryParseJson(value: string): unknown {
 }
 
 function isSensitiveKey(key: string): boolean {
-    return /api[_-]?key|token|authorization|password|secret|cookie|bearer/i.test(key);
+    return /api[_-]?key|token|authorization|password|secret|credential|cookie|bearer/i.test(key);
+}
+
+function isExplicitlyEirenHidden(value: Record<string, unknown>): boolean {
+    if (value.allowEirenView === false || value.eirenVisible === false || value.ownerViewReadable === false) return true;
+    const access = String(value.accessDecision ?? value.access ?? "").toLowerCase();
+    const visibility = String(value.visibility ?? "").toLowerCase();
+    return ["deny", "denied", "locked", "blocked", "hidden"].includes(access)
+        || ["locked", "blocked", "hidden", "private_to_owner"].includes(visibility);
 }
 
 function sanitizeValue(value: unknown, keyHint = "", depth = 0): unknown {
@@ -251,14 +260,17 @@ function sanitizeValue(value: unknown, keyHint = "", depth = 0): unknown {
             const mime = value.slice(5, value.indexOf(";") > 0 ? value.indexOf(";") : Math.min(value.length, 80));
             return `[data URL omitted: ${mime || "unknown"}, ${value.length} chars]`;
         }
-        if (value.length > MAX_STRING_LENGTH) return `${value.slice(0, MAX_STRING_LENGTH)}\n...(${value.length - MAX_STRING_LENGTH} chars truncated)`;
-        return value;
+        const redacted = redactSensitiveLogText(value);
+        if (redacted.length > MAX_STRING_LENGTH) return `${redacted.slice(0, MAX_STRING_LENGTH)}\n...(${redacted.length - MAX_STRING_LENGTH} chars truncated)`;
+        return redacted;
     }
     if (typeof value !== "object" || value === null) return value;
     if (Array.isArray(value)) return value.map(item => sanitizeValue(item, keyHint, depth + 1));
 
+    const record = value as Record<string, unknown>;
+    if (isExplicitlyEirenHidden(record)) return "[不允许 Eiren 查看]";
     const output: Record<string, unknown> = {};
-    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    for (const [key, child] of Object.entries(record)) {
         output[key] = sanitizeValue(child, key, depth + 1);
     }
     return output;

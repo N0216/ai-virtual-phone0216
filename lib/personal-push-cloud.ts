@@ -12,7 +12,7 @@ const PUSH_SUBSCRIPTION_GATE_KEY = "push_account_subscribed_v1";
 export const PERSONAL_PUSH_GATEWAY_SLUG = "ai-phone-push";
 export const PERSONAL_PUSH_GENERATE_SLUG = "push-generate";
 export const PERSONAL_PUSH_SW_SCOPE = "/personal-push/";
-export const PERSONAL_PUSH_SCHEMA_VERSION = 4;
+export const PERSONAL_PUSH_SCHEMA_VERSION = 6;
 
 registerKvMigration(PERSONAL_PUSH_STATE_KEY);
 
@@ -27,6 +27,16 @@ export type PersonalPushCloudState = {
 };
 
 export type RoleMemoryAccess = { mcpUrl: string; token: string };
+export type RoleQueryLog = {
+  id: string;
+  operation_label: string;
+  role_name?: string | null;
+  source_label?: string | null;
+  query_text?: string | null;
+  result_count: number;
+  detail?: string | null;
+  queried_at: string;
+};
 
 function projectRefFromUrl(value: string): string {
   try {
@@ -75,7 +85,7 @@ export function isRoleMemoryCloudReady(): boolean {
   return Boolean(
     isPersonalPushCloudActive()
     && state?.healthStatus === "ready"
-    && state.schemaVersion >= 4,
+    && state.schemaVersion >= 5,
   );
 }
 
@@ -135,6 +145,13 @@ export async function getRoleMemoryAccess(): Promise<RoleMemoryAccess> {
     throw new Error(data?.error || `角色记忆连接返回 HTTP ${response.status}`);
   }
   return { mcpUrl: data.mcpUrl, token: data.token };
+}
+
+export async function getRoleQueryLogs(): Promise<RoleQueryLog[]> {
+  const response = await personalPushFetch("role-query-logs", { method: "GET" });
+  const data = await response.json().catch(() => null) as { ok?: boolean; logs?: RoleQueryLog[]; error?: string } | null;
+  if (!response.ok || !data?.ok) throw new Error(data?.error || "暂时无法读取官 G 查询记录。");
+  return Array.isArray(data.logs) ? data.logs : [];
 }
 
 /** 预约流量在个人云启用后直达用户 Supabase；未启用时保持原有站点通道。 */
@@ -221,7 +238,7 @@ export async function deployPersonalPushCloud(accessToken: string): Promise<Pers
   const projectRef = projectRefFromUrl(url);
   if (!projectRef) throw new Error("无法从 Supabase URL 解析项目标识。");
 
-  const [gatewayRes, generateRes, resultRes, bridgeRes, screenRes, roleMemoryMcpRes, schemaRes] = await Promise.all([
+  const [gatewayRes, generateRes, resultRes, bridgeRes, screenRes, roleMemoryMcpRes, schemaRes, schemaV6Res] = await Promise.all([
     fetch("/ai-phone-push/gateway.mjs", { cache: "no-store" }),
     fetch("/ai-phone-push/push-generate.mjs", { cache: "no-store" }),
     fetch("/ai-phone-push/push-shortcut-result.mjs", { cache: "no-store" }),
@@ -229,12 +246,13 @@ export async function deployPersonalPushCloud(accessToken: string): Promise<Pers
     fetch("/ai-phone-push/screen-chat.mjs", { cache: "no-store" }),
     fetch("/ai-phone-push/role-memory-mcp.mjs", { cache: "no-store" }),
     fetch("/ai-phone-push/schema.sql", { cache: "no-store" }),
+    fetch("/ai-phone-push/schema-v6.sql", { cache: "no-store" }),
   ]);
-  if (!gatewayRes.ok || !generateRes.ok || !resultRes.ok || !bridgeRes.ok || !screenRes.ok || !roleMemoryMcpRes.ok || !schemaRes.ok) {
+  if (!gatewayRes.ok || !generateRes.ok || !resultRes.ok || !bridgeRes.ok || !screenRes.ok || !roleMemoryMcpRes.ok || !schemaRes.ok || !schemaV6Res.ok) {
     throw new Error("获取离线推送部署包失败，请刷新页面后重试。");
   }
-  const [gatewayCode, generateCode, resultCode, bridgeCode, screenChatCode, roleMemoryMcpCode, schemaSql] = await Promise.all([
-    gatewayRes.text(), generateRes.text(), resultRes.text(), bridgeRes.text(), screenRes.text(), roleMemoryMcpRes.text(), schemaRes.text(),
+  const [gatewayCode, generateCode, resultCode, bridgeCode, screenChatCode, roleMemoryMcpCode, schemaSql, schemaV6Sql] = await Promise.all([
+    gatewayRes.text(), generateRes.text(), resultRes.text(), bridgeRes.text(), screenRes.text(), roleMemoryMcpRes.text(), schemaRes.text(), schemaV6Res.text(),
   ]);
 
   let response: Response;
@@ -242,7 +260,7 @@ export async function deployPersonalPushCloud(accessToken: string): Promise<Pers
     response = await fetch("/api/push/deploy-personal", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ projectRef, token, gatewayCode, generateCode, resultCode, bridgeCode, screenChatCode, roleMemoryMcpCode, schemaSql }),
+      body: JSON.stringify({ projectRef, token, gatewayCode, generateCode, resultCode, bridgeCode, screenChatCode, roleMemoryMcpCode, schemaSql, schemaV6Sql }),
     });
   } catch {
     throw new Error("无法访问站点部署接口，请检查网络后重试。");

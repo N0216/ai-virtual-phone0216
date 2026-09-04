@@ -10,6 +10,13 @@ function stripBracketBlock(text: string, tag: string): string {
     return text.replace(new RegExp(`\\[${escaped}\\]([\\s\\S]*?)\\[\\/${escaped}\\]`, "g"), "");
 }
 
+function stripInnerMonologue(text: string): string {
+    const family = "内心|内心独白|心声";
+    return text
+        .replace(new RegExp(`\\[(?:${family})\\][\\s\\S]*?\\[\\/(?:${family})\\]`, "gi"), "")
+        .replace(new RegExp(`\\[(?:${family})\\]\\s*[\\s\\S]*?(?=\\n\\s*\\n|$)`, "gi"), "");
+}
+
 /** 常见富媒体标记 → 弹窗友好文案；与 parseAndSaveResponse 的横幅口径对齐。 */
 function humanizeSegment(segment: string): string {
     const marker = segment.match(/^\[([^\][：:]{1,12})[：:]([\s\S]*?)\]$/);
@@ -31,7 +38,7 @@ function humanizeSegment(segment: string): string {
 export function splitResponseForPushPreview(rawText: string): string[] {
     let text = parseStateValues(rawText).cleanText;
     text = stripBracketBlock(text, "状态栏");
-    text = stripBracketBlock(text, "内心");
+    text = stripInnerMonologue(text);
     text = text.replace(/\n{3,}/g, "\n\n").trim();
     return text
         .split(/\n\n+/)

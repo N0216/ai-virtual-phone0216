@@ -19,7 +19,8 @@ begin
         'push_server_config', 'push_subscriptions', 'push_jobs', 'push_outbox',
         'push_shortcut_commands', 'push_bridge_config', 'push_bridge_snapshots',
         'push_screen_sessions', 'push_screen_threads',
-        'role_chat_messages', 'role_handoffs', 'role_shared_memories'
+        'role_chat_messages', 'role_handoffs', 'role_shared_memories',
+        'role_events', 'role_call_transcript_chunks', 'role_query_logs'
       ])
   ) into has_unknown_public_table;
 
@@ -35,7 +36,7 @@ create table if not exists public.ai_phone_cloud_meta (
   updated_at timestamptz not null default now()
 );
 insert into public.ai_phone_cloud_meta (id, schema_version, updated_at)
-values ('personal-cloud', 4, now())
+values ('personal-cloud', 5, now())
 on conflict (id) do update set schema_version = excluded.schema_version, updated_at = excluded.updated_at;
 
 create table if not exists public.push_server_config (
@@ -111,6 +112,75 @@ create table if not exists public.role_shared_memories (
 );
 create index if not exists role_shared_memories_recent_idx
   on public.role_shared_memories (user_id, role_id, status, updated_at desc);
+
+-- 个人端“发生过什么”的只读资料目录。普通聊天仍保存在 role_chat_messages，
+-- 这里收纳离线聊天、角色日记、朋友圈、自定义应用和角色虚拟手机快照。
+create table if not exists public.role_events (
+  user_id text not null,
+  role_id text not null,
+  role_name text,
+  source_type text not null,
+  source_id text not null,
+  title text not null,
+  content text not null,
+  metadata jsonb not null default '{}'::jsonb,
+  event_at timestamptz not null,
+  updated_at timestamptz not null default now(),
+  primary key (user_id, role_id, source_type, source_id),
+  constraint role_events_source_type_check check (
+    source_type in ('offline_chat', 'custom_app', 'diary', 'moments', 'virtual_phone')
+  )
+);
+create index if not exists role_events_recent_idx
+  on public.role_events (user_id, role_id, source_type, event_at desc);
+
+alter table public.role_events drop constraint if exists role_events_source_type_check;
+alter table public.role_events add constraint role_events_source_type_check check (
+  source_type in ('offline_chat', 'custom_app', 'diary', 'moments', 'virtual_phone', 'call')
+);
+
+-- 完整通话转录按稳定版本和顺序分片；父 role_events 只在整版上传完成后切换版本。
+create table if not exists public.role_call_transcript_chunks (
+  user_id text not null,
+  role_id text not null,
+  call_id text not null,
+  transcript_version text not null,
+  chunk_index integer not null,
+  entry_id text not null,
+  speaker text not null,
+  occurred_at timestamptz not null,
+  sender_name text,
+  sender_character_id text,
+  part_index integer not null,
+  part_count integer not null,
+  content text not null,
+  updated_at timestamptz not null default now(),
+  primary key (user_id, role_id, call_id, transcript_version, chunk_index),
+  constraint role_call_transcript_chunks_speaker_check check (speaker in ('user', 'assistant')),
+  constraint role_call_transcript_chunks_part_check check (
+    chunk_index >= 0 and part_index >= 0 and part_count > 0 and part_index < part_count
+  )
+);
+create index if not exists role_call_transcript_chunks_read_idx
+  on public.role_call_transcript_chunks (user_id, role_id, call_id, transcript_version, chunk_index);
+
+-- 官 G 每次查了哪里、查了什么，用中文留痕；不保存访问令牌。
+create table if not exists public.role_query_logs (
+  id text primary key,
+  user_id text not null,
+  operation text not null,
+  operation_label text not null,
+  role_id text,
+  role_name text,
+  source_type text,
+  source_label text,
+  query_text text,
+  result_count integer not null default 0,
+  detail text,
+  queried_at timestamptz not null default now()
+);
+create index if not exists role_query_logs_recent_idx
+  on public.role_query_logs (user_id, queried_at desc);
 
 create table if not exists public.push_subscriptions (
   endpoint text primary key,
@@ -219,9 +289,8 @@ create table if not exists public.push_bridge_snapshots (
   primary key (user_id, rule_id)
 );
 
--- v2 的 push_screen_sessions 是按时间切分的第二套聊天记录，还会持久化原始截图。
--- 屏幕速聊现在只是小手机唯一聊天窗口的远程入口，因此升级时移除这份临时缓存。
-drop table if exists public.push_screen_sessions;
+-- v2 的 push_screen_sessions 可能仍含旧截图或聊天缓存。升级脚本不得删除它；
+-- 如需清理，必须在另一次经过备份和用户确认的数据迁移中处理。
 
 create table if not exists public.push_screen_threads (
   user_id text not null,
@@ -361,12 +430,18 @@ alter table public.push_screen_threads enable row level security;
 alter table public.role_chat_messages enable row level security;
 alter table public.role_handoffs enable row level security;
 alter table public.role_shared_memories enable row level security;
+alter table public.role_events enable row level security;
+alter table public.role_call_transcript_chunks enable row level security;
+alter table public.role_query_logs enable row level security;
 
 -- 屏幕速聊表和 RPC 只由 Edge Function 的 service_role 使用；客户端角色没有表级权限。
 revoke all on table public.push_screen_threads from public, anon, authenticated;
 revoke all on table public.role_chat_messages from public, anon, authenticated;
 revoke all on table public.role_handoffs from public, anon, authenticated;
 revoke all on table public.role_shared_memories from public, anon, authenticated;
+revoke all on table public.role_events from public, anon, authenticated;
+revoke all on table public.role_call_transcript_chunks from public, anon, authenticated;
+revoke all on table public.role_query_logs from public, anon, authenticated;
 
 -- 2026 年起新项目不会自动把 public 新表暴露给 Data API。
 -- 网关和生成器只以 service_role 访问，绝不授予 anon 或 authenticated。
@@ -383,7 +458,10 @@ grant select, insert, update, delete on table
   public.push_screen_threads,
   public.role_chat_messages,
   public.role_handoffs,
-  public.role_shared_memories
+  public.role_shared_memories,
+  public.role_events,
+  public.role_call_transcript_chunks,
+  public.role_query_logs
 to service_role;
 
 revoke all on function public.ai_phone_screen_chat_begin(text, text, text, text, integer) from public, anon, authenticated;

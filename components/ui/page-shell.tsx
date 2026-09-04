@@ -1,7 +1,8 @@
 "use client";
 
-import type { ReactNode, Ref } from "react";
+import { useRef, type ReactNode, type Ref } from "react";
 import { ChevronLeft } from "lucide-react";
+import { useEdgeSwipeBack } from "@/lib/use-edge-swipe-back";
 
 type PageShellProps = {
   title?: ReactNode;
@@ -15,8 +16,10 @@ type PageShellProps = {
 };
 
 export function PageShell({ title = "", onBack, leftAction, rightAction, children, footer, className, bodyRef }: PageShellProps) {
+  const shellRef = useRef<HTMLDivElement>(null);
+  useEdgeSwipeBack(() => onBack?.(), Boolean(onBack), { rootRef: shellRef, priority: 100 });
   return (
-    <div className={`page-shell ${className ?? ""}`}>
+    <div ref={shellRef} className={`page-shell ${className ?? ""}`}>
       <header className="page-header" data-ui="header">
         <div className="page-header-safe-area" />
         <div className="page-header-content">

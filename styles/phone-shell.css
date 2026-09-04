@@ -717,15 +717,15 @@
   position: absolute;
   top: 60px;
   z-index: 400;
-  background: rgba(0, 0, 0, 0.45);
-  color: #fff;
+  background: var(--widget-picker-button-bg, rgba(0, 0, 0, 0.45));
+  color: var(--widget-picker-button-text, #fff);
   border: none;
-  border-radius: 18px;
+  border-radius: var(--widget-picker-button-radius, 18px);
   padding: 7px 18px;
   font-size: calc(14px*var(--app-text-scale,1));
   font-weight: 500;
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(var(--widget-picker-blur, 18px));
+  -webkit-backdrop-filter: blur(var(--widget-picker-blur, 18px));
   cursor: pointer;
   letter-spacing: 0.02em;
 }
@@ -749,8 +749,11 @@
   z-index: 300;
   width: 100%;
   max-height: 65%;
-  background: var(--c-panel);
-  border-radius: 20px 20px 0 0;
+  color: var(--widget-picker-text, var(--c-text-title));
+  background: var(--widget-picker-bg, var(--c-panel));
+  border-radius: var(--widget-picker-radius, 28px) var(--widget-picker-radius, 28px) 0 0;
+  backdrop-filter: blur(var(--widget-picker-blur, 18px)) saturate(1.25);
+  -webkit-backdrop-filter: blur(var(--widget-picker-blur, 18px)) saturate(1.25);
   padding: 16px;
   display: flex;
   flex-direction: column;
@@ -765,6 +768,68 @@
 
 .widget-picker-sheet .wm-cat-item .widget-glass {
   pointer-events: none;
+}
+.widget-picker-title,
+.widget-picker-close {
+  color: var(--widget-picker-text, var(--c-text-title));
+}
+
+.widget-picker-tab {
+  color: color-mix(in srgb, var(--widget-picker-text, #222) 66%, transparent);
+  background: color-mix(in srgb, var(--widget-picker-button-bg, #111) 8%, transparent);
+}
+.widget-picker-tab.is-active {
+  color: var(--widget-picker-button-text, #fff);
+  background: var(--widget-picker-button-bg, #1c1c1e);
+}
+.widget-diy-actions {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 25;
+  display: flex;
+  gap: 5px;
+}
+.widget-diy-actions button {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--widget-picker-button-radius, 999px);
+  color: var(--widget-picker-button-text, #fff);
+  background: var(--widget-picker-button-bg, rgba(20, 20, 22, 0.72));
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: 0 4px 14px rgba(0,0,0,0.12);
+}
+.widget-create-pane {
+  flex: 0 0 100%;
+  width: 100%;
+  padding: 0 2px 12px;
+}
+.widget-create-intro {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 2px 2px 12px;
+  padding: 12px 14px;
+  border-radius: 18px;
+  color: var(--widget-picker-text, #222);
+  background: rgba(255,255,255,0.42);
+  border: 1px solid rgba(255,255,255,0.6);
+}
+.widget-create-intro strong { font-size: calc(13px*var(--app-text-scale,1)); }
+.widget-create-intro p { margin: 3px 0 0; font-size: calc(10px*var(--app-text-scale,1)); opacity: .58; line-height: 1.45; }
+.widget-create-icon {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  background: rgba(255,255,255,.62);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.75);
 }
 
 /* ── Page controls ── */
@@ -1085,20 +1150,26 @@
 
   :root {
     --phone-screen-width: 100vw;
-    --phone-screen-height: 100lvh;
+    /* Safari browser chrome changes the visible height while scrolling. `lvh`
+       keeps the largest height and can put the dock/input below the current
+       viewport; `dvh` follows the actually visible area. */
+    --phone-screen-height: 100vh;
+    --phone-screen-height: 100dvh;
   }
 
   html,
   body {
     overflow: hidden;
     width: 100%;
-    height: 100lvh;
+    height: 100vh;
+    height: 100dvh;
     background: var(--c-page-body-bg);
   }
 
   .app-root {
     width: 100vw;
-    height: 100lvh;
+    height: 100vh;
+    height: 100dvh;
     padding: 0;
     display: flex;
     justify-content: flex-start;
@@ -1154,7 +1225,8 @@
 
   .app-root.splash-root {
     width: 100vw;
-    height: 100lvh;
+    height: 100vh;
+    height: 100dvh;
     margin: 0;
     padding: 0;
     display: flex;

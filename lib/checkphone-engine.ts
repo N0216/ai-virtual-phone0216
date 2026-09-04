@@ -1,4 +1,5 @@
 import { loadCharacters } from "./character-storage";
+import { listCheckPhoneAlbumItems } from "./photo-album-storage";
 import { normalizeBilingualTextInput, splitBilingualText } from "./bilingual-text";
 import { previewMessagesForApi, sendLLMRequest } from "./chat-engine";
 import { getChatMessagePreview, loadChatMessages, loadChatSessions, type ChatMessage, type ChatSession } from "./chat-storage";
@@ -4902,8 +4903,12 @@ export async function generateCheckPhonePhotos(
   if (!apiConfig) return { payload: null, summary: "", error: "未找到可用的 API 配置", debugRawOutput: "" };
 
   try {
+    const authorizedPhotos = listCheckPhoneAlbumItems(characterId);
+    const authorizedPhotoSummary = authorizedPhotos.length > 0
+      ? `\n\n【用户授权接入的真实角色相册照片】\n${authorizedPhotos.slice(0, 30).map((item, index) => `${index + 1}. ${item.title}（保存时间：${new Date(item.createdAt).toLocaleString("zh-CN")}）`).join("\n")}\n这些照片已被用户明确允许在查手机中使用；不得引用未列出的私人照片。`
+      : "";
     const messages = await buildCheckPhoneAppMessages(characterId, "photos", preset, worldBooks, regexes, {
-      snapshotSummary: previousPayload ? formatSnapshotSummary(previousPayload) : "",
+      snapshotSummary: `${previousPayload ? formatSnapshotSummary(previousPayload) : ""}${authorizedPhotoSummary}`,
       lastRefreshAt: previousUpdatedAt ?? "",
     });
     const rawOutput = await sendLLMRequest(

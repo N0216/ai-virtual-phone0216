@@ -8,7 +8,7 @@
 // Token 与取回的 key 经站点代理透传，不存储不记录。
 
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
-import { Check, CloudUpload, ExternalLink, Loader2, MessageSquare, Satellite } from "lucide-react";
+import { BrainCircuit, Check, CloudUpload, Copy, ExternalLink, Eye, EyeOff, Loader2, MessageSquare, Satellite } from "lucide-react";
 import {
     isCloudBackupConfigured,
     loadCloudBackupConfig,
@@ -22,10 +22,23 @@ import {
     ensureWeixinCloudCronSecret,
     syncAllWeixinBotRuntimesToCloud,
 } from "@/lib/weixin-cloud-sync";
-import { deployPersonalPushCloud, isPersonalPushCloudActive } from "@/lib/personal-push-cloud";
+import {
+    deployPersonalPushCloud,
+    getRoleMemoryAccess,
+    getRoleQueryLogs,
+    isPersonalPushCloudActive,
+    isRoleMemoryCloudReady,
+    type RoleMemoryAccess,
+    type RoleQueryLog,
+} from "@/lib/personal-push-cloud";
 import { ensurePersonalPushSubscription, getOfflinePushState, markAccountPushSubscribed } from "@/lib/push-client";
 import { getWeixinCloudDeployedAt, markWeixinCloudDeployed, savePushCloudScheduled, saveWeixinCloudScheduled } from "@/lib/cloud-deploy-status";
 import { Input, Select } from "@/components/ui/form";
+import {
+    loadRoleMemorySyncStatus,
+    ROLE_MEMORY_SYNC_STATUS_EVENT,
+    type RoleMemorySyncStatus,
+} from "@/lib/role-memory-sync";
 
 const SUPABASE_TOKENS_URL = "https://supabase.com/dashboard/account/tokens";
 
@@ -78,6 +91,12 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
     const [cloudReady, setCloudReady] = useState(false);
     const [pushActive, setPushActive] = useState(false);
     const [weixinDeployed, setWeixinDeployed] = useState(false);
+    const [roleMemoryReady, setRoleMemoryReady] = useState(false);
+    const [roleMemorySync, setRoleMemorySync] = useState<RoleMemorySyncStatus>(() => loadRoleMemorySyncStatus());
+    const [roleMemoryAccess, setRoleMemoryAccess] = useState<RoleMemoryAccess | null>(null);
+    const [roleMemoryAccessOpen, setRoleMemoryAccessOpen] = useState(false);
+    const [showRoleMemoryToken, setShowRoleMemoryToken] = useState(false);
+    const [roleQueryLogs, setRoleQueryLogs] = useState<RoleQueryLog[]>([]);
     const [token, setToken] = useState("");
     const [organizations, setOrganizations] = useState<OrganizationOption[]>([]);
     const [selectedOrganizationSlug, setSelectedOrganizationSlug] = useState("");
@@ -94,14 +113,32 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
         setCloudReady(isCloudBackupConfigured(loadCloudBackupConfig()));
         setPushActive(isPersonalPushCloudActive());
         setWeixinDeployed(Boolean(getWeixinCloudDeployedAt()));
+        setRoleMemoryReady(isRoleMemoryCloudReady());
+    }, []);
+
+    useEffect(() => {
+        const refresh = () => setRoleMemorySync(loadRoleMemorySyncStatus());
+        window.addEventListener(ROLE_MEMORY_SYNC_STATUS_EVENT, refresh);
+        return () => window.removeEventListener(ROLE_MEMORY_SYNC_STATUS_EVENT, refresh);
     }, []);
 
     const configuredUrl = normalizeBackupUrl(loadCloudBackupConfig().url);
+
+    const roleSyncText = (() => {
+        if (!roleMemoryReady) return "个人云未连接或版本需要更新";
+        if (roleMemorySync.status === "syncing") return "正在同步聊天、记忆和角色资料…";
+        if (roleMemorySync.status === "failed") return `同步失败：${roleMemorySync.lastError || "未知步骤"}`;
+        if (roleMemorySync.lastSyncedAt) {
+            return `同步成功 · ${new Date(roleMemorySync.lastSyncedAt).toLocaleString()}`;
+        }
+        return "等待首次同步";
+    })();
 
     const refreshStatus = () => {
         setCloudReady(isCloudBackupConfigured(loadCloudBackupConfig()));
         setPushActive(isPersonalPushCloudActive());
         setWeixinDeployed(Boolean(getWeixinCloudDeployedAt()));
+        setRoleMemoryReady(isRoleMemoryCloudReady());
         onConfigChanged?.();
     };
 
@@ -209,8 +246,8 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
                     updated_at timestamptz not null default now()
                 );
                 insert into public.ai_phone_cloud_meta (id, schema_version, updated_at)
-                values ('personal-cloud', 3, now())
-                on conflict (id) do update set schema_version = excluded.schema_version, updated_at = excluded.updated_at;`,
+                values ('personal-cloud', 1, now())
+                on conflict (id) do nothing;`,
             });
 
             // 取回密钥，写入原云备份配置（保留自动备份等既有设置项）
@@ -262,7 +299,7 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
                     markAccountPushSubscribed(false);
                 }
                 savePushCloudScheduled(true);
-                done.push("离线推送");
+                done.push("离线推送与角色记忆交接");
             }
 
             setToken("");
@@ -312,6 +349,27 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
         </div>
     );
 
+    const openRoleMemoryAccess = async () => {
+        if (!roleMemoryReady || busy) return;
+        setBusy("organizations");
+        try {
+            const [access, logs] = await Promise.all([getRoleMemoryAccess(), getRoleQueryLogs()]);
+            setRoleMemoryAccess(access);
+            setRoleQueryLogs(logs);
+            setShowRoleMemoryToken(false);
+            setRoleMemoryAccessOpen(true);
+        } catch (err) {
+            setResultDialog({ title: "读取失败", text: err instanceof Error ? err.message : String(err) });
+        } finally {
+            setBusy(null);
+        }
+    };
+
+    const copyText = async (value: string, label: string) => {
+        await navigator.clipboard.writeText(value);
+        setResultDialog({ title: "已复制", text: `${label}已复制。不要把访问令牌发到聊天里。` });
+    };
+
     return (
         <div className="flex flex-col gap-4">
             {/* 中央主按钮：直达令牌页 */}
@@ -353,7 +411,66 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
                 {statusCard(<CloudUpload size={17} strokeWidth={1.9} />, "云备份", cloudReady, `已部署 · ${configuredUrl.replace(/^https?:\/\//, "").replace(/\.supabase\.co$/, "")}`)}
                 {statusCard(<MessageSquare size={17} strokeWidth={1.9} />, "微信接入", weixinDeployed, "云函数与定时任务已部署")}
                 {statusCard(<Satellite size={17} strokeWidth={1.9} />, "离线推送", pushActive, "已部署到你的 Supabase")}
+                <button
+                    type="button"
+                    className="text-left"
+                    onClick={() => void openRoleMemoryAccess()}
+                    disabled={!roleMemoryReady || Boolean(busy)}
+                >
+                    {statusCard(<BrainCircuit size={17} strokeWidth={1.9} />, "官 G ↔ 小手机资料", roleMemoryReady, "轻点查看连接和中文查询记录")}
+                </button>
+                <div
+                    className={`rounded-[14px] px-3 py-2 text-xs ${roleMemorySync.status === "failed" ? "bg-red-500/10 text-red-700" : "bg-black/[0.03] text-black/60"}`}
+                    role="status"
+                >
+                    个人云资料：{roleSyncText}
+                </div>
             </div>
+
+            {roleMemoryAccessOpen && roleMemoryAccess && (
+                <div className="modal-overlay" data-ui="modal" onClick={() => setRoleMemoryAccessOpen(false)}>
+                    <div className="modal-dialog" role="dialog" aria-modal="true" aria-label="官 G 记忆连接" onClick={(e) => e.stopPropagation()}>
+                        <div className="modal-body flex flex-col gap-3">
+                            <h3 className="modal-title">官 G 个人端连接</h3>
+                            <p className="menu-desc !mt-0">官 G 可按角色查询聊天、离线聊天、朋友圈、日记、自定义应用和角色虚拟手机。重要记忆盒子仍单独保存。令牌不要发进聊天。</p>
+                            <label className="flex flex-col gap-1">
+                                <span className="menu-desc !mt-0">MCP 地址</span>
+                                <div className="flex items-center gap-2">
+                                    <Input readOnly value={roleMemoryAccess.mcpUrl} className="min-w-0 flex-1" />
+                                    <button type="button" className="ui-btn" onClick={() => void copyText(roleMemoryAccess.mcpUrl, "MCP 地址")}><Copy size={16} /></button>
+                                </div>
+                            </label>
+                            <div className="flex flex-col gap-2 rounded-[14px] bg-black/[0.03] p-3">
+                                <strong className="text-sm">官 G 最近查了什么</strong>
+                                {roleQueryLogs.length === 0 ? (
+                                    <span className="menu-desc !mt-0">还没有查询记录。</span>
+                                ) : roleQueryLogs.slice(0, 12).map(log => (
+                                    <div key={log.id} className="border-b border-black/5 pb-2 text-xs last:border-0 last:pb-0">
+                                        <div>{log.operation_label} · {log.role_name || "全部角色"} · {log.source_label || "全部资料"}</div>
+                                        <div className="menu-desc !mt-0">
+                                            {new Date(log.queried_at).toLocaleString()} · 找到 {log.result_count} 条
+                                            {log.query_text ? ` · 关键词「${log.query_text}」` : ""}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                            <label className="flex flex-col gap-1">
+                                <span className="menu-desc !mt-0">Bearer 访问令牌</span>
+                                <div className="flex items-center gap-2">
+                                    <Input readOnly type={showRoleMemoryToken ? "text" : "password"} value={roleMemoryAccess.token} className="min-w-0 flex-1" />
+                                    <button type="button" className="ui-btn" aria-label="显示或隐藏访问令牌" onClick={() => setShowRoleMemoryToken(value => !value)}>
+                                        {showRoleMemoryToken ? <EyeOff size={16} /> : <Eye size={16} />}
+                                    </button>
+                                    <button type="button" className="ui-btn" onClick={() => void copyText(roleMemoryAccess.token, "访问令牌")}><Copy size={16} /></button>
+                                </div>
+                            </label>
+                        </div>
+                        <div className="modal-footer">
+                            <button type="button" className="ui-btn ui-btn-primary" onClick={() => setRoleMemoryAccessOpen(false)}>知道了</button>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* 结果弹窗（成功/失败统一） */}
             {resultDialog && (
@@ -414,7 +531,7 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
                             )}
                             {scopeRow("云备份", scopeBackup, setScopeBackup, cloudReady)}
                             {scopeRow("微信接入", scopeWeixin, setScopeWeixin, weixinDeployed)}
-                            {scopeRow("离线推送", scopePush, setScopePush, pushActive)}
+                            {scopeRow("离线推送 + 角色记忆交接", scopePush, setScopePush, pushActive && roleMemoryReady)}
                         </div>
                         <div className="modal-footer">
                             <button

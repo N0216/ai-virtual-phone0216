@@ -1,26 +1,27 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ArrowRight } from "lucide-react";
 
 import { AccountGate } from "@/components/auth/account-gate";
 import { CloudBackupScheduler } from "@/components/cloud-backup-scheduler";
 import { RoleMemorySyncScheduler } from "@/components/role-memory-sync-scheduler";
 import { RealityBridgeScheduler } from "@/components/reality-bridge-scheduler";
 import { MediaMaintenanceScheduler } from "@/components/media-maintenance-scheduler";
+import { DeepSeekExecutionScheduler } from "@/components/deepseek-execution-scheduler";
 import { DesktopShell } from "./desktop-shell";
 import { OfflinePushRevampAnnouncement } from "./offline-push-revamp-announcement";
-import { SplashAnimation } from "./splash-animation";
+import { SplashExperienceScreen } from "./entry-experience-screen";
 import { MusicProvider } from "@/lib/music-context";
 import { hydrateKvDb } from "@/lib/kv-db";
 import { getThemeAssetMap, readThemeProfile } from "@/lib/theme-storage";
 import { resolveActiveIconSkins, type ThemeProfile } from "@/lib/theme-types";
+import {
+  DEFAULT_ENTRY_EXPERIENCE_SETTINGS,
+  readEntryExperienceSettings,
+  type EntryExperienceSettings,
+} from "@/lib/entry-experience-storage";
 import { hasPendingMcpOAuthCallback } from "@/lib/tool-executor";
 import { shouldRequestPwaFullscreen } from "@/lib/pwa-display-mode";
-
-const TEXT = {
-  loading: "\u52A0\u8F7D\u4E2D...",
-};
 
 const BUILTIN_FONT_URLS = [
   "/fonts/huiwen.woff2",
@@ -150,37 +151,10 @@ async function warmBuiltinFonts(shouldStop: () => boolean): Promise<void> {
   await Promise.all(BUILTIN_FONT_LOAD_SPECS.map((spec) => document.fonts.load(spec).catch(() => [])));
 }
 
-function SplashScreen({ ready = false, onEnter }: { ready?: boolean; onEnter?: () => void }) {
-  return (
-    <main className="app-root splash-root">
-      <section
-        className="phone-shell-wrap splash-shell-wrap"
-        aria-label={TEXT.loading}
-      >
-        <div className="phone-case">
-          <div className="phone-frame">
-            <div className="phone-shell splash-phone-screen">
-              <SplashAnimation />
-              <button
-                type="button"
-                className={ready ? "splash-enter-button splash-enter-button-show" : "splash-enter-button"}
-                onClick={onEnter}
-                disabled={!ready}
-                aria-label="Enter"
-              >
-                <ArrowRight size={18} strokeWidth={1.8} />
-              </button>
-            </div>
-          </div>
-        </div>
-      </section>
-    </main>
-  );
-}
-
 type PreparedDesktopTheme = {
   profile: ThemeProfile;
   assets: Record<string, string>;
+  entrySettings: EntryExperienceSettings;
 };
 
 function collectFirstPaintThemeAssetIds(profile: ThemeProfile): string[] {
@@ -221,14 +195,20 @@ function preloadImageDataUrl(url: string): Promise<void> {
 
 async function prepareDesktopThemeForFirstPaint(): Promise<PreparedDesktopTheme> {
   const profile = readThemeProfile();
+  const entrySettings = readEntryExperienceSettings();
   const assetIds = collectFirstPaintThemeAssetIds(profile);
   const assets = assetIds.length ? await getThemeAssetMap(assetIds) : {};
   await Promise.all(Object.values(assets).map(preloadImageDataUrl));
-  return { profile, assets };
+  return {
+    profile,
+    assets,
+    entrySettings,
+  };
 }
 
 export function MainApp() {
   const [preparedDesktopTheme, setPreparedDesktopTheme] = useState<PreparedDesktopTheme | null>(null);
+  const [entrySettings, setEntrySettings] = useState<EntryExperienceSettings>(DEFAULT_ENTRY_EXPERIENCE_SETTINGS);
   const [hydrated, setHydrated] = useState(false);
   const [splashDismissed, setSplashDismissed] = useState(false);
 
@@ -252,6 +232,7 @@ export function MainApp() {
 
       if (cancelled) return;
       setPreparedDesktopTheme(nextPreparedTheme);
+      if (nextPreparedTheme?.entrySettings) setEntrySettings(nextPreparedTheme.entrySettings);
       setHydrated(true);
       if (hasPendingMcpOAuthCallback()) {
         setSplashDismissed(true);
@@ -280,7 +261,11 @@ export function MainApp() {
   return (
     <AccountGate>
       {!splashDismissed ? (
-        <SplashScreen ready={hydrated} onEnter={() => setSplashDismissed(true)} />
+        <SplashExperienceScreen
+          ready={hydrated}
+          settings={entrySettings}
+          onEnter={() => setSplashDismissed(true)}
+        />
       ) : (
         <main className="app-root">
           <MusicProvider>
@@ -291,6 +276,7 @@ export function MainApp() {
             <OfflinePushRevampAnnouncement />
             <CloudBackupScheduler />
             <RoleMemorySyncScheduler />
+            <DeepSeekExecutionScheduler />
             <RealityBridgeScheduler />
             <MediaMaintenanceScheduler />
           </MusicProvider>

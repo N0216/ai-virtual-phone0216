@@ -5,7 +5,7 @@ import {
     initChatDb,
     dbPutMessage, dbDeleteMessage, dbDeleteMessagesBySession, dbDeleteMessagesByIds,
     dbPutMessages, dbPutSessions, dbPutContacts, dbDeleteSession,
-    dbReplaceContacts, dbReplaceSessions,
+    dbReplaceContacts, dbReplaceSessions, dbDeleteCallRecordsBySession,
 } from "./chat-db";
 import { resolveUserIdentity } from "./settings-storage";
 import { loadCharacters } from "./character-storage";
@@ -46,6 +46,29 @@ export type ChatSession = {
     alias?: string;
     videoBackground?: string;
     voiceBackground?: string;
+    /** 1:1 语音通话的主要发言语言；auto 表示跟随用户本轮语言。 */
+    voiceCallLanguage?: string;
+    /** 语音通话实时字幕的翻译语言；none 表示只显示原文。 */
+    voiceCallTranslationLanguage?: string;
+    /** 每个联系人独立的语音通话画面；原版仍可随时切回。 */
+    voiceCallAppearance?: {
+        visualStyle?: "original" | "noir";
+        showLatinName?: boolean;
+        latinName?: string;
+        captionFont?: "serif" | "system" | "rounded";
+        orbTone?: "mist" | "lilac" | "blue" | "rose";
+    };
+    /** 通话结束后在聊天中的留痕样式。wechat 为兼容旧数据的内部值，界面称“挂断气泡”。 */
+    callRecordStyle?: "original" | "wechat";
+    /** 挂断气泡各状态的可编辑文案；ended 中的 {时长} 由真实通话数据替换。 */
+    callRecordTemplates?: Partial<Record<"ended" | "cancelled" | "rejected" | "missed", string>>;
+    /** 挂断气泡的装饰与通话类别标题；只影响显示，不改变真实通话类型。 */
+    callRecordAppearance?: {
+        voiceIcon?: string;
+        videoIcon?: string;
+        voiceLabel?: string;
+        videoLabel?: string;
+    };
     isBlacklisted?: boolean;
     customCSS?: string;
     isMuted?: boolean;
@@ -188,6 +211,15 @@ export type ChatMessage = {
         xiaohongshuCoverIcon?: string;
         xiaohongshuTone?: string;
         callDuration?: string;    // 通话时长（如 05:23）
+        /** 本次通话的私有转写。只供“通话内容”页读取，不拆成普通聊天消息。 */
+        callTranscript?: Array<{
+            id: string;
+            role: "user" | "assistant";
+            content: string;
+            createdAt: string;
+            senderName?: string;
+            senderCharacterId?: string;
+        }>;
         voiceDuration?: number;   // 语音条时长（秒）
         synthesizedFromText?: string; // 语音条当前音频对应的合成文本
         memoryContent?: string;   // 记忆写入内容
@@ -254,6 +286,27 @@ export type ChatMessage = {
     senderCharacterId?: string; // which character sent this assistant message in a group chat
     senderName?: string; // cached display name to avoid repeated lookups
 };
+
+let _activeChatSessionId: string | null = null;
+
+export function setActiveChatSessionId(sessionId: string | null): void {
+    _activeChatSessionId = sessionId || null;
+}
+
+export function markChatSessionRead(sessionId: string): void {
+    const sessions = loadChatSessions();
+    const index = sessions.findIndex(session => session.id === sessionId);
+    if (index < 0 || sessions[index].unreadCount === 0) return;
+    sessions[index] = { ...sessions[index], unreadCount: 0 };
+    saveChatSessions(sessions);
+    if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("chat-unread-updated", { detail: { sessionId, unreadCount: 0 } }));
+}
+
+export function getTotalChatUnreadCount(excludeSessionId?: string): number {
+    return loadChatSessions().reduce((total, session) => session.id === excludeSessionId
+        ? total
+        : total + Math.max(0, Number(session.unreadCount) || 0), 0);
+}
 
 export type ChatAppSettings = {
     globalAppBackground?: string; // base64 or URL
@@ -1092,6 +1145,7 @@ export function deleteChatSession(sessionId: string) {
     const filtered = sessions.filter(s => s.id !== sessionId);
     saveChatSessions(filtered);
     dbDeleteSession(sessionId);
+    void dbDeleteCallRecordsBySession(sessionId).catch(err => console.warn("[ChatDB] delete call records failed:", err));
     clearChatSessionMessages(sessionId); // Cleanup associated messages
 }
 
@@ -1149,7 +1203,11 @@ export function pushChatMessage(msg: Omit<ChatMessage, "id" | "createdAt" | "sta
             sessions[sessIdx].lastMessagePreview = preview;
         }
         sessions[sessIdx].updatedAt = newMsg.createdAt;
+        if (newMsg.role === "assistant" && _activeChatSessionId !== newMsg.sessionId) {
+            sessions[sessIdx].unreadCount = Math.max(0, Number(sessions[sessIdx].unreadCount) || 0) + 1;
+        }
         saveChatSessions(sessions);
+        if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("chat-unread-updated", { detail: { sessionId: newMsg.sessionId, unreadCount: sessions[sessIdx].unreadCount } }));
     }
 
     if (typeof window !== "undefined") {
@@ -1183,7 +1241,11 @@ export function upsertImportedChatMessage(msg: ChatMessage): { message: ChatMess
             sessions[sessIdx].lastMessageId = newMsg.id;
             if (preview) sessions[sessIdx].lastMessagePreview = preview;
             sessions[sessIdx].updatedAt = newMsg.createdAt;
+            if (newMsg.role === "assistant" && _activeChatSessionId !== newMsg.sessionId) {
+                sessions[sessIdx].unreadCount = Math.max(0, Number(sessions[sessIdx].unreadCount) || 0) + 1;
+            }
             saveChatSessions(sessions);
+            if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("chat-unread-updated", { detail: { sessionId: newMsg.sessionId, unreadCount: sessions[sessIdx].unreadCount } }));
         }
     }
 

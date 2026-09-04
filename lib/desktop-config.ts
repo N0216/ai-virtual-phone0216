@@ -12,6 +12,7 @@ export type IconId =
   | "xiaohongshu"
   | "dwelling"
   | "checkphone"
+  | "photos"
   | "shopping"
   | "calendar"
   | "interview_magazine"
@@ -55,7 +56,7 @@ export type IconMeta = {
   path?: string;
 };
 
-export const PAGE_1_DEFAULT: IconId[] = ["chat", "diary", "music", "calendar", "checkphone", "shopping", "reading", "interview_magazine"];
+export const PAGE_1_DEFAULT: IconId[] = ["chat", "diary", "music", "calendar", "checkphone", "photos", "shopping", "reading", "interview_magazine"];
 
 export const PAGE_2_DEFAULT: IconId[] = [
   "cocreate",
@@ -89,6 +90,7 @@ export const ICONS: Record<IconId, IconMeta> = {
     placeholder: false
   },
   checkphone: { id: "checkphone", label: "查手机", tone: "var(--c-icon-slate)", placeholder: false },
+  photos: { id: "photos", label: "相册", tone: "var(--c-icon-rose)", placeholder: false },
   dwelling: {
     id: "dwelling",
     label: "栖所",

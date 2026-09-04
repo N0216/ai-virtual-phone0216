@@ -1,8 +1,9 @@
 "use client";
 import { useState, useRef, useEffect } from "react";
-import type { DIYWidgetTemplate, DIYTemplateSlot, WidgetSize, WidgetType } from "@/lib/widget-types";
+import type { DIYWidgetTemplate, DIYTemplateSlot, WidgetSize } from "@/lib/widget-types";
 import { WIDGET_SIZE_CELLS } from "@/lib/widget-types";
 import { saveThemeAssetFromBlob, getThemeAssetMap } from "@/lib/theme-storage";
+import { X } from "lucide-react";
 
 type DIYWidgetEditorProps = {
   template?: DIYWidgetTemplate;
@@ -10,7 +11,7 @@ type DIYWidgetEditorProps = {
   onClose: () => void;
 };
 
-const SIZES: WidgetSize[] = ["2x2", "2x4", "4x4"];
+const DEFAULT_HTML = `<style>\n  body { margin: 0; padding: 12px; font-family: sans-serif; color: white; display: flex; align-items: center; justify-content: center; background: linear-gradient(135deg, #FF6B6B, #4ECDC4); }\n  h1 { font-size: calc(24px*var(--app-text-scale,1)); }\n</style>\n<body>\n  <h1 id="time">00:00</h1>\n  <script>\n    setInterval(() => {\n      document.getElementById('time').innerText = new Date().toLocaleTimeString();\n    }, 1000);\n  </script>\n</body>`;
 
 export function DIYWidgetEditor({ template, onSave, onClose }: DIYWidgetEditorProps) {
   const [mode, setMode] = useState<"image" | "code">(template?.mode === "code" ? "code" : "image");
@@ -26,12 +27,12 @@ export function DIYWidgetEditor({ template, onSave, onClose }: DIYWidgetEditorPr
 
   // Code Mode State
   const [htmlString, setHtmlString] = useState(
-    template?.htmlString || `<style>\n  body { margin: 0; padding: 12px; font-family: sans-serif; color: white; display: flex; align-items: center; justify-content: center; background: linear-gradient(135deg, #FF6B6B, #4ECDC4); }\n  h1 { font-size: calc(24px*var(--app-text-scale,1)); }\n</style>\n<body>\n  <h1 id="time">00:00</h1>\n  <script>\n    setInterval(() => {\n      document.getElementById('time').innerText = new Date().toLocaleTimeString();\n    }, 1000);\n  </script>\n</body>`
+    template?.htmlString || DEFAULT_HTML
   );
 
   useEffect(() => {
     if (template) {
-       setMode(template.mode === "code" as any ? "code" : "image");
+       setMode(template.mode === "code" ? "code" : "image");
        setSize(template.size);
        setName(template.name);
        if (template.mode === "image") {
@@ -46,7 +47,9 @@ export function DIYWidgetEditor({ template, onSave, onClose }: DIYWidgetEditorPr
        setName("DIY组件");
        setBgAssetId(undefined);
        setSlots([]);
+       setHtmlString(DEFAULT_HTML);
     }
+    setActiveSlotId(null);
   }, [template]);
 
   useEffect(() => {
@@ -72,9 +75,22 @@ export function DIYWidgetEditor({ template, onSave, onClose }: DIYWidgetEditorPr
   }
 
   function handleSave() {
+    const cleanName = name.trim();
+    if (!cleanName) {
+      window.alert("先给组件取个名字吧");
+      return;
+    }
+    if (mode === "image" && !bgAssetId) {
+      window.alert("请先选择一张图片");
+      return;
+    }
+    if (mode === "code" && !htmlString.trim()) {
+      window.alert("请先填写 HTML / CSS 代码");
+      return;
+    }
     const newTemplate: DIYWidgetTemplate = {
       id: template?.id || `diy-${Date.now()}`,
-      name,
+      name: cleanName,
       size,
       mode: mode,
     };
@@ -125,20 +141,34 @@ export function DIYWidgetEditor({ template, onSave, onClose }: DIYWidgetEditorPr
       {/* Glass Header */}
       <div className="flex flex-col gap-4 p-5 bg-white/50 backdrop-blur-xl border-b border-black/5 z-20">
         
-        {/* Toggle (Centered now since close button removed) */}
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-[calc(16px*var(--app-text-scale,1))] font-semibold text-gray-900">
+              {template ? "编辑我的组件" : "创建我的组件"}
+            </div>
+            <div className="mt-1 text-[calc(11px*var(--app-text-scale,1))] text-gray-500">
+              图片模式不需要写代码；高级模式可粘贴完整 HTML / CSS
+            </div>
+          </div>
+          <button type="button" onClick={onClose} className="shrink-0 rounded-full bg-black/5 p-2 text-gray-500 active:scale-95" aria-label="关闭创建器">
+            <X size={16} />
+          </button>
+        </div>
+
+        {/* Creation mode */}
         <div className="flex justify-center items-center">
           <div className="flex bg-black/5 p-1 rounded-full relative shadow-inner w-fit">
             <button 
               className={`py-1.5 rounded-full text-[calc(13px*var(--app-text-scale,1))] font-bold transition-all relative z-10 w-[96px] flex justify-center ${mode === "image" ? 'text-black' : 'text-gray-500 hover:text-gray-700'}`}
               onClick={() => setMode("image")}
             >
-              🖼️ 图形挖图
+              图片组件
             </button>
             <button 
               className={`py-1.5 rounded-full text-[calc(13px*var(--app-text-scale,1))] font-bold transition-all relative z-10 w-[96px] flex justify-center ${mode === "code" ? 'text-black' : 'text-gray-500 hover:text-gray-700'}`}
               onClick={() => setMode("code")}
             >
-              💻 代码沙盒
+              HTML / CSS
             </button>
             {/* Absolute positioning animated active background block */}
             <div 
@@ -236,13 +266,13 @@ export function DIYWidgetEditor({ template, onSave, onClose }: DIYWidgetEditorPr
               <div className="bg-white/60 backdrop-blur-md rounded-2xl p-5 border border-white flex flex-col gap-4 shadow-sm">
                  <div className="flex justify-between items-center gap-4">
                    <div className="flex-1">
-                     <h4 className="text-[calc(13px*var(--app-text-scale,1))] font-bold text-gray-800">1. 上传绝美底图</h4>
-                     <p className="text-[calc(11px*var(--app-text-scale,1))] text-gray-500 mt-1 font-medium leading-snug">推荐使用带透明镂空的 PNG 作为相框</p>
+                     <h4 className="text-[calc(13px*var(--app-text-scale,1))] font-bold text-gray-800">1. 选择组件图片</h4>
+                     <p className="text-[calc(11px*var(--app-text-scale,1))] text-gray-500 mt-1 font-medium leading-snug">普通图片会整张显示；透明 PNG 也可以做成可换图相框</p>
                    </div>
                    <button className="shrink-0 bg-white text-blue-600 font-bold border border-blue-100 shadow-sm px-4 py-2 rounded-xl text-[calc(12px*var(--app-text-scale,1))] hover:bg-blue-50 hover:shadow-md active:scale-95 transition-all" onClick={() => fileInputRef.current?.click()}>
                      选择图片
                    </button>
-                   <input type="file" ref={fileInputRef} className="hidden" accept="image/png,image/jpeg" onChange={handleImageUpload} />
+                   <input type="file" ref={fileInputRef} className="hidden" accept="image/png,image/jpeg,image/webp,image/gif" onChange={handleImageUpload} />
                  </div>
               </div>
 
@@ -250,11 +280,11 @@ export function DIYWidgetEditor({ template, onSave, onClose }: DIYWidgetEditorPr
               <div className="bg-white/60 backdrop-blur-md rounded-2xl p-5 border border-white flex flex-col gap-4 shadow-sm transition-all duration-300">
                  <div className="flex justify-between items-center gap-4">
                    <div className="flex-1">
-                     <h4 className="text-[calc(13px*var(--app-text-scale,1))] font-bold text-gray-800">2. 预留相册槽位</h4>
-                     <p className="text-[calc(11px*var(--app-text-scale,1))] text-gray-500 mt-1 font-medium leading-snug">在底图下方预留出的图片显示区域</p>
+                     <h4 className="text-[calc(13px*var(--app-text-scale,1))] font-bold text-gray-800">2. 可换图区域（可选）</h4>
+                     <p className="text-[calc(11px*var(--app-text-scale,1))] text-gray-500 mt-1 font-medium leading-snug">只想放一张图可直接保存；做相框时再添加可换图区域</p>
                    </div>
                    <button className="shrink-0 bg-[#1c1c1e] text-white font-bold shadow-md px-4 py-2 rounded-xl text-[calc(12px*var(--app-text-scale,1))] flex items-center justify-center gap-1 hover:shadow-lg active:scale-95 transition-all" onClick={addSlot}>
-                     <span>+</span> 新增槽位
+                     <span>+</span> 添加区域
                    </button>
                  </div>
                  

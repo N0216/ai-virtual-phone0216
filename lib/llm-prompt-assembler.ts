@@ -14,7 +14,7 @@ import { formatXiaohongshuShareForPrompt } from "./chat-share";
 import { stripStateAndInnerForPrompt } from "./prompt-sanitizer";
 import { formatPromptTimestamp, getPromptTimestampOptionsForTimeContext, resolvePromptTimeAware, type PromptTimestampOptions } from "./prompt-time";
 import { formatCharacterRelationsForPrompt } from "./character-world-storage";
-import { buildCharacterTimeContext, buildGroupTimeContext, type CharacterTimeContext } from "./character-time";
+import { buildCharacterTimeContext, buildGroupTimeContext, TEMPORAL_AWARENESS_TAG, type CharacterTimeContext } from "./character-time";
 import { formatShoppingPaymentRequestHistory } from "./shopping-payment-request";
 import { buildGroupAdminBracketText } from "./group-admin";
 
@@ -296,6 +296,24 @@ function applyTimeContextToMacroEngine(engine: MacroEngine, timeContext: Charact
     engine.characterTime = timeContext.characterTime;
     engine.characterTimeZone = timeContext.characterTimeZone;
     engine.characterWeekday = timeContext.characterWeekday;
+}
+
+function ensureTemporalAwarenessBlock(
+    blocks: PromptBlock[],
+    timeContext: CharacterTimeContext,
+    timeAware: boolean,
+    depth: number,
+): void {
+    if (!timeAware || !timeContext.timeContext.trim()) return;
+    const openTag = `<${TEMPORAL_AWARENESS_TAG}`;
+    if (blocks.some(block => block.text.includes(openTag))) return;
+    blocks.push({
+        text: timeContext.timeContext,
+        role: "system",
+        depth,
+        order: -1,
+        marker: TEMPORAL_AWARENESS_TAG,
+    });
 }
 
 // ── Helper: normalize role string → LLMMessageRole ──
@@ -620,7 +638,8 @@ export function assemblePromptPayload(input: AssemblerInput): LLMMessage[] {
     const resolvedUserName = userIdentity?.name || userName;
     const blocks: PromptBlock[] = [];
     const timeAware = resolveTimeAware(input.timeAware);
-    const promptTimeContext = input.timeContext ?? buildCharacterTimeContext(character.timeZone);
+    const promptTimeContext = input.timeContext
+        ?? buildCharacterTimeContext(character.timeZone, new Date(), timeAware ? history : undefined);
     const promptTimestampOptions = input.promptTimestampOptions
         ?? getPromptTimestampOptionsForTimeContext(promptTimeContext);
 
@@ -1036,6 +1055,15 @@ export function assemblePromptPayload(input: AssemblerInput): LLMMessage[] {
             }
         });
     }
+
+    // Custom presets are allowed to omit {{timeContext}}. Keep one authoritative
+    // temporal block anyway, while avoiding duplicates when the macro is present.
+    ensureTemporalAwarenessBlock(
+        blocks,
+        promptTimeContext,
+        timeAware,
+        resolveBeforeHistoryDepth(history.length, input.unifiedRecentItems?.length),
+    );
 
     // --- Sort: depth descending, then order ascending ---
     blocks.sort((a, b) => {
@@ -1735,7 +1763,7 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
         ?? buildGroupTimeContext(members.map(member => ({
             name: member.character.name,
             timeZone: member.character.timeZone,
-        })));
+        })), new Date(), timeAware ? history : undefined);
     const groupPromptTimestampOptions = input.promptTimestampOptions
         ?? getPromptTimestampOptionsForTimeContext(groupTimeContext);
     const beforeHistoryDepth = resolveBeforeHistoryDepth(history.length, unifiedRecentItems?.length);
@@ -2188,6 +2216,10 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
             });
         });
     }
+
+    // The group preset may also omit {{timeContext}}. Inject one shared block only
+    // when no member/group macro already expanded a temporal-awareness block.
+    ensureTemporalAwarenessBlock(blocks, groupTimeContext, timeAware, beforeHistoryDepth);
 
     // Sort: depth descending, then order ascending
     blocks.sort((a, b) => {

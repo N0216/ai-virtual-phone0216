@@ -106,9 +106,11 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
         const refreshSessions = () => setSessions(loadChatSessions());
         window.addEventListener("weixin-messages-updated", refreshSessions);
         window.addEventListener("chat-messages-updated", refreshSessions);
+        window.addEventListener("chat-unread-updated", refreshSessions);
         return () => {
             window.removeEventListener("weixin-messages-updated", refreshSessions);
             window.removeEventListener("chat-messages-updated", refreshSessions);
+            window.removeEventListener("chat-unread-updated", refreshSessions);
         };
     }, []);
 
@@ -657,7 +659,7 @@ function SessionItem({ session, onSelect, isPinned }: { session: ChatSession, on
             onClick={onSelect}
         >
             {isGroup ? (
-                <div className="minimal-avatar-wrapper grid grid-cols-2 grid-rows-2 gap-[1px] p-[2px] bg-[var(--c-card-border)] rounded-full overflow-hidden">
+                <div className="minimal-avatar-wrapper chat-session-avatar grid grid-cols-2 grid-rows-2 gap-[1px] p-[2px] bg-[var(--c-card-border)] rounded-full">
                     {groupAvatarItems.map((c) => (
                         <div key={c.id} className="overflow-hidden rounded-[3px] bg-[var(--c-page-body-bg)]">
                             {c.avatar ? (
@@ -670,15 +672,17 @@ function SessionItem({ session, onSelect, isPinned }: { session: ChatSession, on
                     {Array.from({ length: Math.max(0, 4 - groupAvatarItems.length) }).map((_, i) => (
                         <div key={`empty-${i}`} className="overflow-hidden rounded-[3px] bg-[var(--c-page-body-bg)]" />
                     ))}
+                    {session.unreadCount > 0 && <UnreadBadge count={session.unreadCount} />}
                 </div>
             ) : (
-                <div className="minimal-avatar-wrapper">
+                <div className="minimal-avatar-wrapper chat-session-avatar">
                     {character?.avatar ? (
                         <img src={character.avatar} className="w-full h-full object-cover pointer-events-none rounded-full" alt="" />
                     ) : (
                         <ChatFallbackAvatar className="pointer-events-none rounded-full" />
                     )}
                     <span className="minimal-online-dot" />
+                    {session.unreadCount > 0 && <UnreadBadge count={session.unreadCount} />}
                 </div>
             )}
             <div className="flex-1 overflow-hidden h-[48px] flex flex-col justify-center gap-1">
@@ -698,4 +702,8 @@ function SessionItem({ session, onSelect, isPinned }: { session: ChatSession, on
             </div>
         </div>
     );
+}
+
+function UnreadBadge({ count }: { count: number }) {
+    return <span className="chat-unread-badge" data-unread-count={count} aria-label={`${count} 条未读消息`}>{count > 99 ? "99+" : count}</span>;
 }

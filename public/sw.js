@@ -1,6 +1,8 @@
-const CACHE_VERSION = "ai-phone-pwa-v12";
+const CACHE_VERSION = "ai-phone-pwa-v13";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`;
+const USER_ASSET_CACHE = "ai-phone-user-pwa-assets-v1";
+const USER_PWA_ASSET_PREFIX = "/__ai_phone_pwa_icon__/";
 
 const PRECACHE_URLS = [
   "/",
@@ -22,7 +24,7 @@ self.addEventListener("activate", (event) => {
     caches.keys()
       .then((keys) => Promise.all(
         keys
-          .filter((key) => !key.startsWith(CACHE_VERSION))
+          .filter((key) => key !== USER_ASSET_CACHE && !key.startsWith(CACHE_VERSION))
           .map((key) => caches.delete(key))
       ))
       // 刷新预缓存的 "/" 快照：它是离线导航的最终兜底，若停留在旧部署版本，
@@ -173,6 +175,15 @@ self.addEventListener("notificationclick", (event) => {
 
 self.addEventListener("fetch", (event) => {
   const { request } = event;
+  const requestUrl = new URL(request.url);
+  if (requestUrl.origin === self.location.origin && requestUrl.pathname.startsWith(USER_PWA_ASSET_PREFIX)) {
+    event.respondWith(
+      caches.open(USER_ASSET_CACHE)
+        .then((cache) => cache.match(request, { ignoreSearch: true }))
+        .then((cached) => cached || Response.error())
+    );
+    return;
+  }
   if (request.mode === "navigate") {
     event.respondWith(networkFirst(request));
     return;

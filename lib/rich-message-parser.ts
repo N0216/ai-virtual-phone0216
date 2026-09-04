@@ -535,11 +535,13 @@ function findCustomAppRichCandidate(segment: string): RichPatternCandidate | nul
 
 // ── Structured hidden block extraction ───────────────────
 
-function extractBracketBlock(text: string, tag: string): { cleaned: string; content: string } {
+function extractBracketBlock(text: string, tags: string | string[]): { cleaned: string; content: string } {
     let content = "";
     let cleaned = text;
-    const escapedTag = tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const rx = new RegExp(`\\[${escapedTag}\\]([\\s\\S]*?)\\[\\/${escapedTag}\\]`, "g");
+    const family = (Array.isArray(tags) ? tags : [tags])
+        .map(tag => tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+        .join("|");
+    const rx = new RegExp(`\\[(?:${family})\\]([\\s\\S]*?)\\[\\/(?:${family})\\]`, "gi");
 
     let match;
     while ((match = rx.exec(cleaned)) !== null) {
@@ -549,6 +551,19 @@ function extractBracketBlock(text: string, tag: string): { cleaned: string; cont
         content += block;
     }
     cleaned = cleaned.replace(rx, "").trim();
+
+    // Models occasionally omit a closing tag (for example `[内心]...`). Treat only
+    // the current paragraph as the hidden block, so a following visible reply after
+    // a blank line is preserved instead of either leaking the protocol or being swallowed.
+    const unclosed = new RegExp(`\\[(?:${family})\\]\\s*([\\s\\S]*?)(?=\\n\\s*\\n|$)`, "gi");
+    let unclosedMatch;
+    while ((unclosedMatch = unclosed.exec(cleaned)) !== null) {
+        const block = unclosedMatch[1].trim();
+        if (!block) continue;
+        if (content) content += "\n\n";
+        content += block;
+    }
+    cleaned = cleaned.replace(unclosed, "").trim();
 
     return { cleaned, content };
 }
@@ -626,8 +641,8 @@ export function parseAIResponse(rawText: string, previousState: StateValue[]): P
     const actionCleaned = stripActionShells(parsedSV.cleanText);
 
     // 2. Extract display-only status panel, then inner monologue
-    const status = extractBracketBlock(actionCleaned, "状态栏");
-    const mono = extractBracketBlock(status.cleaned, "内心");
+    const status = extractBracketBlock(actionCleaned, ["状态栏"]);
+    const mono = extractBracketBlock(status.cleaned, ["内心", "内心独白", "心声"]);
 
     // 2.1. Collapse residual blank lines left by tag extraction
     const postCleaned = mono.cleaned.replace(/\n{3,}/g, "\n\n").trim();

@@ -8,8 +8,19 @@ import {
     recordModelUsage,
     type ModelUsageCategory,
 } from "./model-usage";
+import { redactSensitiveLogText } from "./log-redaction";
+import { pushApiLog } from "./api-log-store";
 
 const SIMPLE_ANTHROPIC_AUTO_MAX_TOKENS = 8192;
+
+function requestUrlForLog(value: string): string {
+    try {
+        const parsed = new URL(value);
+        return `${parsed.origin}${parsed.pathname}`.slice(0, 120);
+    } catch {
+        return redactSensitiveLogText(value.split(/[?#]/, 1)[0]).slice(0, 120);
+    }
+}
 
 /**
  * Resolve the base URL for an API config.
@@ -201,12 +212,12 @@ export async function simpleLLMCall(
 
         const bodySize = body.length;
         const bodyTokenEstimate = Math.ceil(bodySize / 3);
-        console.log("[simpleLLMCall] Request:", { url: fetchUrl.slice(0, 80), bodySize, bodyTokenEstimate, model: config.defaultModel });
+        console.log("[simpleLLMCall] Request:", { url: requestUrlForLog(fetchUrl), bodySize, bodyTokenEstimate, model: redactSensitiveLogText(config.defaultModel) });
 
         const res = await fetch(fetchUrl, { method: "POST", headers, body, signal: options?.signal });
 
         if (!res.ok) {
-            const errText = await res.text().catch(() => "");
+            const errText = redactSensitiveLogText(await res.text().catch(() => ""));
             console.warn("[simpleLLMCall] API error:", res.status, errText.slice(0, 300));
             return { content: null, error: `API 错误 ${res.status}: ${errText.slice(0, 200)}` };
         }
@@ -228,6 +239,14 @@ export async function simpleLLMCall(
             totalTokens: usage?.total_tokens ?? estimatedUsage.totalTokens,
             estimated: !usage?.total_tokens,
         });
+        pushApiLog({
+            characterName: options?.usageLabel || "后台功能",
+            model: config.defaultModel,
+            messages,
+            rawResponse: JSON.stringify(data),
+            usage,
+            source: "background",
+        });
         if (!content) {
             console.warn("[simpleLLMCall] Empty response. Keys:", JSON.stringify(Object.keys(data || {})),
                 "Full:", JSON.stringify(data).slice(0, 500));
@@ -236,8 +255,9 @@ export async function simpleLLMCall(
 
         return { content, finishReason, wasTruncated, usage };
     } catch (err) {
-        console.warn("[simpleLLMCall] fetch error:", err);
-        return { content: null, error: `请求失败: ${err instanceof Error ? err.message : String(err)}` };
+        const detail = redactSensitiveLogText(err instanceof Error ? err.message : String(err));
+        console.warn("[simpleLLMCall] fetch error:", detail);
+        return { content: null, error: `请求失败: ${detail}` };
     }
 }
 

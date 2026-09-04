@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ProxyAgent, fetch as undiciFetch, type Dispatcher } from "undici";
+import { redactSensitiveLogText } from "@/lib/log-redaction";
 
 type ModelListRequest = {
   apiKey?: string;
@@ -78,12 +79,12 @@ export async function POST(req: NextRequest) {
     });
     const text = await res.text();
     if (!res.ok) {
-      return NextResponse.json({ error: `模型列表 API 错误 ${res.status}: ${text.slice(0, 400)}` }, { status: 502 });
+      return NextResponse.json({ error: `模型列表 API 错误 ${res.status}: ${redactSensitiveLogText(text).slice(0, 400)}` }, { status: 502 });
     }
 
     const parsed = JSON.parse(text);
     return NextResponse.json({ models: extractModels(parsed) });
   } catch (err) {
-    return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 502 });
+    return NextResponse.json({ error: redactSensitiveLogText(err instanceof Error ? err.message : String(err)) }, { status: 502 });
   }
 }

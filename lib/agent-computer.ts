@@ -95,6 +95,7 @@ export async function agentComputerRequest<T = Record<string, unknown>>(
     workspace: string,
     payload: ActionPayload = {},
     config = loadAgentComputerConfig(),
+    signal?: AbortSignal,
 ): Promise<T> {
     if (!config.endpoint || !config.token) throw new Error("角色电脑未配置（设置 → 角色电脑）");
     const res = await fetch(config.endpoint, {
@@ -104,6 +105,7 @@ export async function agentComputerRequest<T = Record<string, unknown>>(
             Authorization: `Bearer ${config.token}`,
         },
         body: JSON.stringify({ action, workspace, ...payload }),
+        signal,
     });
     const data = await res.json().catch(() => ({})) as { ok?: boolean; error?: string } & T;
     if (!res.ok || data.ok !== true) throw new Error(data.error || `角色电脑请求失败（${res.status}）`);

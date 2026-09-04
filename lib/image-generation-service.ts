@@ -4,6 +4,7 @@ import { getChatImageFromIndexedDB } from "./chat-asset-storage";
 import { storeMediaBlob } from "./media-cache-storage";
 import { throwIfAborted } from "./abort-utils";
 import { recordModelUsage } from "./model-usage";
+import { redactSensitiveLogText } from "./log-redaction";
 
 export type ImageGenerationResult = {
   mediaRef: string;
@@ -13,7 +14,49 @@ export type ImageGenerationResult = {
   prompt: string;
   usedReferenceImage: boolean;
   revisedPrompt?: string;
+  providerId: string;
+  providerName: string;
+  model: string;
 };
+
+export function resolveImageGenerationProvider(
+  settings: ImageGenerationSettings,
+  characterId?: string,
+  explicitProviderId?: string,
+): { settings: ImageGenerationSettings; provider: ImageGenerationSettings["providers"][number] } {
+  const bindingId = characterId ? settings.characterProviderBindings?.[characterId] : undefined;
+  const provider = settings.providers.find((item) => item.id === explicitProviderId)
+    ?? settings.providers.find((item) => item.id === bindingId)
+    ?? settings.providers.find((item) => item.id === settings.activeProviderId)
+    ?? settings.providers[0]
+    ?? {
+      id: "image-provider-default",
+      name: "原版配置",
+      requestMode: settings.requestMode,
+      apiKey: settings.apiKey,
+      baseUrl: settings.baseUrl,
+      model: settings.model,
+      models: [settings.model],
+      size: settings.size,
+      quality: settings.quality,
+      extraPrompt: settings.extraPrompt,
+      createdAt: 0,
+      updatedAt: 0,
+    };
+  return {
+    provider,
+    settings: {
+      ...settings,
+      requestMode: provider.requestMode,
+      apiKey: provider.apiKey,
+      baseUrl: provider.baseUrl,
+      model: provider.model,
+      size: provider.size,
+      quality: provider.quality,
+      extraPrompt: provider.extraPrompt,
+    },
+  };
+}
 
 type ExtractedImage =
   | { kind: "b64"; b64: string; mimeType?: string; revisedPrompt?: string }
@@ -219,7 +262,7 @@ async function fetchImageUrlAsBase64(url: string, signal?: AbortSignal): Promise
   const res = await fetch(url, { signal });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`图片 URL 下载失败 ${res.status}: ${text.slice(0, 160)}`);
+    throw new Error(`图片 URL 下载失败 ${res.status}: ${redactSensitiveLogText(text).slice(0, 160)}`);
   }
   const blob = await res.blob();
   const dataUrl = await blobToDataUrl(blob);
@@ -232,7 +275,7 @@ async function parseImageGenerationResponse(res: Response, signal?: AbortSignal)
   const contentType = (res.headers.get("content-type") || "").toLowerCase();
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`生图 API 错误 ${res.status}: ${text.slice(0, 600)}`);
+    throw new Error(`生图 API 错误 ${res.status}: ${redactSensitiveLogText(text).slice(0, 600)}`);
   }
 
   if (contentType.startsWith("image/")) {
@@ -279,7 +322,7 @@ export async function fetchImageGenerationModels(settings: Pick<ImageGenerationS
       });
       const text = await res.text();
       if (!res.ok) {
-        throw new Error(`模型列表 API 错误 ${res.status}: ${text.slice(0, 400)}`);
+        throw new Error(`模型列表 API 错误 ${res.status}: ${redactSensitiveLogText(text).slice(0, 400)}`);
       }
       return extractModels(JSON.parse(text));
     } catch (error) {
@@ -505,9 +548,13 @@ export async function generateImageFromConfiguredApi(params: {
   characterId?: string;
   useReferenceImage?: boolean;
   settings?: ImageGenerationSettings;
+  providerId?: string;
+  model?: string;
   signal?: AbortSignal;
 }): Promise<ImageGenerationResult | null> {
-  const settings = params.settings ?? loadImageGenerationSettings();
+  const sourceSettings = params.settings ?? loadImageGenerationSettings();
+  const resolved = resolveImageGenerationProvider(sourceSettings, params.characterId, params.providerId);
+  const settings = params.model?.trim() ? { ...resolved.settings, model: params.model.trim() } : resolved.settings;
   if (!settings.enabled) return null;
 
   const description = params.description.trim();
@@ -530,7 +577,7 @@ export async function generateImageFromConfiguredApi(params: {
   recordModelUsage({
     category: "image",
     model: settings.model,
-    label: referenceImageDataUrl ? "参考图生图" : "文字生图",
+    label: `${resolved.provider.name} · ${referenceImageDataUrl ? "参考图生图" : "文字生图"}`,
   });
 
   throwIfAborted(params.signal);
@@ -547,6 +594,9 @@ export async function generateImageFromConfiguredApi(params: {
     prompt,
     usedReferenceImage: Boolean(referenceImageDataUrl),
     revisedPrompt: data.revisedPrompt,
+    providerId: resolved.provider.id,
+    providerName: resolved.provider.name,
+    model: settings.model,
   };
 }
 

@@ -35,6 +35,7 @@ import { loadCharacters } from "./character-storage";
 import type { RegexConfig } from "./settings-types";
 import type { LLMMessage } from "./llm-prompt-assembler";
 import { canStartAutoWakeModelCall } from "./model-usage";
+import { getMobileDaddyWakeContextAccess, type MobileDaddyWakeContextAccess } from "./tool-executor";
 
 // ── 离线来电：让 AI 自己决定"这条主动消息要不要改成打电话" ──────────
 // 只在主动类离线任务（冷场重连/定时唤醒）的生成快照里注入一句能力说明；
@@ -297,6 +298,9 @@ export async function armFollowUpBailout(
                         providerKind: request.providerKind,
                     },
                     notify: { title: character.name, url: "/" },
+                    ...(getMobileDaddyWakeContextAccess(character.id)
+                        ? { mobileDaddyWakeContext: getMobileDaddyWakeContextAccess(character.id) }
+                        : {}),
                     merge: {
                         sessionId,
                         followUpIndex: count,
@@ -328,6 +332,7 @@ async function postBailoutJob(input: {
     merge: Record<string, unknown>;
     weixinBotId?: string;
     shortcutContinuation?: OfflineShortcutContinuation | null;
+    mobileDaddyWakeContext?: MobileDaddyWakeContextAccess | null;
 }): Promise<boolean> {
     const response = await pushJobsFetch({
         method: "POST",
@@ -346,6 +351,7 @@ async function postBailoutJob(input: {
                 notify: { title: input.notifyTitle, url: "/" },
                 ...(input.weixinBotId ? { weixin: { botId: input.weixinBotId } } : {}),
                 ...(input.shortcutContinuation ? { shortcutContinuation: input.shortcutContinuation } : {}),
+                ...(input.mobileDaddyWakeContext ? { mobileDaddyWakeContext: input.mobileDaddyWakeContext } : {}),
                 merge: input.merge,
             },
         }),
@@ -470,6 +476,7 @@ export async function armIdleReconnectBailout(rule: IdleReconnectRule): Promise<
             notifyTitle: character.name,
             weixinBotId,
             shortcutContinuation,
+            mobileDaddyWakeContext: getMobileDaddyWakeContextAccess(rule.characterId),
             merge: {
                 sessionId: session.id,
                 prevCount: 0,
@@ -535,6 +542,7 @@ export async function armTimedWakeBailout(schedule: TimedWakeSchedule): Promise<
             notifyTitle: character.name,
             weixinBotId,
             shortcutContinuation,
+            mobileDaddyWakeContext: getMobileDaddyWakeContextAccess(schedule.characterId),
             merge: {
                 sessionId: session.id,
                 prevCount: 0,
@@ -599,6 +607,7 @@ export async function armPeriodCareBailouts(): Promise<void> {
                     executeAtMs,
                     request,
                     notifyTitle: characterName,
+                    mobileDaddyWakeContext: getMobileDaddyWakeContextAccess(session.contactId),
                     merge: {
                         sessionId: session.id,
                         prevCount: 0,

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ProxyAgent, type Dispatcher } from "undici";
+import { redactSensitiveLogText } from "@/lib/log-redaction";
 
 export const maxDuration = 120;
 
@@ -110,7 +111,7 @@ async function fetchImageUrl(url: string): Promise<{ b64: string; mimeType: stri
   const res = await externalFetch(url, { method: "GET" });
   if (!res.ok) {
     const err = await res.text().catch(() => "");
-    throw new Error(`图片 URL 下载失败 ${res.status}: ${err.slice(0, 160)}`);
+    throw new Error(`图片 URL 下载失败 ${res.status}: ${redactSensitiveLogText(err).slice(0, 160)}`);
   }
   const mimeType = res.headers.get("content-type") || "image/png";
   const buffer = Buffer.from(await res.arrayBuffer());
@@ -166,7 +167,7 @@ async function runImageGeneration(input: ImageGenerationRequest): Promise<{ stat
     const contentType = (res.headers.get("content-type") || "").toLowerCase();
     if (!res.ok) {
       const errText = await res.text().catch(() => "");
-      return { status: 502, body: { error: `生图 API 错误 ${res.status}: ${errText.slice(0, 600)}` } };
+      return { status: 502, body: { error: `生图 API 错误 ${res.status}: ${redactSensitiveLogText(errText).slice(0, 600)}` } };
     }
 
     if (contentType.startsWith("image/")) {
@@ -194,7 +195,7 @@ async function runImageGeneration(input: ImageGenerationRequest): Promise<{ stat
       },
     };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = redactSensitiveLogText(err instanceof Error ? err.message : String(err));
     const status = message.toLowerCase().includes("abort") ? 504 : 502;
     return { status, body: { error: message } };
   }
@@ -228,7 +229,7 @@ export async function POST(req: NextRequest) {
             controller.enqueue(encoder.encode("\n" + IMAGE_STREAM_RESULT_MARKER + JSON.stringify({ httpStatus: status, ...body })));
           })
           .catch((err) => {
-            const message = err instanceof Error ? err.message : String(err);
+            const message = redactSensitiveLogText(err instanceof Error ? err.message : String(err));
             try {
               controller.enqueue(encoder.encode("\n" + IMAGE_STREAM_RESULT_MARKER + JSON.stringify({ httpStatus: 502, error: message })));
             } catch { /* 流已关闭 */ }

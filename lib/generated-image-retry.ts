@@ -40,7 +40,7 @@ export function isPendingChatGeneratedImageMessage(message: Pick<ChatMessage, "m
 export async function generateAndApplyChatGeneratedImage(
     message: ChatMessage,
     characterId?: string,
-    options?: { signal?: AbortSignal; description?: string },
+    options?: { signal?: AbortSignal; description?: string; providerId?: string; model?: string },
 ): Promise<ChatMessage> {
     const previousDescription = message.mediaData?.label?.trim() || "";
     const description = (options?.description ?? previousDescription).trim();
@@ -68,6 +68,8 @@ export async function generateAndApplyChatGeneratedImage(
             description,
             characterId,
             useReferenceImage: message.mediaData?.useReferenceImage === true,
+            providerId: options?.providerId,
+            model: options?.model,
             signal: options?.signal,
         });
         if (!generated) throw new Error("生图配置未启用或不完整");
@@ -112,8 +114,9 @@ export async function retryChatGeneratedImage(
     message: ChatMessage,
     characterId?: string,
     nextDescription?: string,
+    generationOptions?: { providerId?: string; model?: string },
 ): Promise<ChatMessage> {
-    return generateAndApplyChatGeneratedImage(message, characterId, { description: nextDescription });
+    return generateAndApplyChatGeneratedImage(message, characterId, { description: nextDescription, ...generationOptions });
 }
 
 export async function retryMomentGeneratedPhoto(post: MomentPost, nextDescription?: string): Promise<MomentPost> {

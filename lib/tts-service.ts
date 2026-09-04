@@ -26,6 +26,7 @@ export function resolveVoiceConfig(characterId: string, appId?: ContentAppId): V
  * Supported providers:
  * - Minimax: REST API → hex-encoded mp3
  * - OpenAI: REST API → binary audio blob
+ * - ElevenLabs: REST API → binary mp3
  */
 export async function synthesizeSpeech(
     text: string,
@@ -45,6 +46,12 @@ export async function synthesizeSpeech(
     if (provider === "OpenAI") {
         const audio = await synthesizeOpenAI(text, voiceConfig);
         if (audio) recordModelUsage({ category: "audio", model: voiceConfig.model || "tts-1", label: "语音合成" });
+        return audio;
+    }
+
+    if (provider === "ElevenLabs") {
+        const audio = await synthesizeElevenLabs(text, voiceConfig);
+        if (audio) recordModelUsage({ category: "audio", model: voiceConfig.model || "eleven_v3", label: "ElevenLabs 语音合成" });
         return audio;
     }
 
@@ -177,6 +184,36 @@ async function synthesizeOpenAI(text: string, config: VoiceApiConfig): Promise<B
 
     const blob = await response.blob();
     return new Blob([await blob.arrayBuffer()], { type: "audio/mpeg" });
+}
+
+// ── ElevenLabs TTS ──────────────────────────────────
+
+async function synthesizeElevenLabs(text: string, config: VoiceApiConfig): Promise<Blob | null> {
+    if (!config.apiKey.trim()) throw new Error("ElevenLabs API Key 未配置");
+    if (!config.defaultVoice.trim()) throw new Error("ElevenLabs Voice ID 未配置");
+
+    const baseUrl = (config.baseUrl || "https://api.elevenlabs.io/v1").replace(/\/$/, "");
+    const voiceId = encodeURIComponent(config.defaultVoice.trim());
+    const response = await fetchWithTimeout(`${baseUrl}/text-to-speech/${voiceId}?output_format=mp3_44100_128`, {
+        method: "POST",
+        headers: {
+            "xi-api-key": config.apiKey.trim(),
+            "Content-Type": "application/json",
+            Accept: "audio/mpeg",
+        },
+        body: JSON.stringify({
+            text,
+            model_id: config.model?.trim() || "eleven_v3",
+        }),
+    });
+
+    if (!response.ok) {
+        const detail = await response.text().catch(() => "");
+        throw new Error(`ElevenLabs TTS 请求失败 (${response.status}): ${detail.slice(0, 300)}`);
+    }
+    const buffer = await response.arrayBuffer();
+    if (buffer.byteLength === 0) throw new Error("ElevenLabs 未返回音频数据");
+    return new Blob([buffer], { type: "audio/mpeg" });
 }
 
 // ── iOS audio playback that coexists with speech recognition ──────────

@@ -560,7 +560,7 @@ export async function listThemeAssetSummaries(): Promise<ThemeAssetSummary[]> {
   }
 }
 
-const THEME_ASSET_ID_RE = /(?:wallpaper|icon_skin|dock_skin|font|bg|chat_bg|sticker|vn_scene|vn_sprite)_[A-Za-z0-9_-]+/g;
+const THEME_ASSET_ID_RE = /(?:wallpaper|icon_skin|dock_skin|font|bg|chat_bg|photo_album|sticker|vn_scene|vn_sprite)_[A-Za-z0-9_-]+/g;
 const ASSET_URL_RE = /asset:\/\/([A-Za-z0-9_-]+)/g;
 
 /** base64 载荷（字符集 A-Za-z0-9+/=）不可能含 "_" 或 ":"，上面两个正则永远

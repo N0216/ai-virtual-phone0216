@@ -221,6 +221,57 @@ function replaceMarkerInStrings(value: unknown, marker: string, replacement: str
   }
 }
 
+// 快照可能保存于数小时甚至数天前；真正请求模型前按属性重新计算时间事实。
+const TEMPORAL_AWARENESS_PATTERN = /<temporal_awareness\b([^>]*)>[\s\S]*?<\/temporal_awareness>/g;
+
+function refreshTemporalAwareness(value: unknown, now = new Date()): void {
+  const attrsOf = (raw: string) => Object.fromEntries([...raw.matchAll(/([a-z_]+)="([^"]*)"/g)].map(match => [match[1], match[2]
+    .replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")]));
+  const safeZone = (raw: string | undefined, fallback = "UTC") => {
+    try { if (raw) new Intl.DateTimeFormat("en-US", { timeZone: raw }).format(now); else throw new Error(); return raw; } catch { return fallback; }
+  };
+  const parts = (date: Date, zone: string) => Object.fromEntries(new Intl.DateTimeFormat("en-US", {
+    timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(date).map(part => [part.type, part.value]));
+  const dateTime = (date: Date, zone: string) => { const p = parts(date, zone); return `${Number(p.year)}年${Number(p.month)}月${Number(p.day)}日${p.hour}:${p.minute}`; };
+  const dateKey = (date: Date, zone: string) => { const p = parts(date, zone); return `${p.year}-${p.month}-${p.day}`; };
+  const weekday = (date: Date, zone: string) => new Intl.DateTimeFormat("zh-CN", { timeZone: zone, weekday: "long" }).format(date);
+  const dayPart = (date: Date, zone: string) => { const h = Number(parts(date, zone).hour); return h < 5 ? "凌晨" : h < 8 ? "清晨" : h < 12 ? "上午" : h < 14 ? "中午" : h < 18 ? "下午" : h < 22 ? "晚上" : "深夜"; };
+  const elapsed = (iso: string | undefined, end: Date) => {
+    if (!iso) return null; const start = new Date(iso); if (!Number.isFinite(start.getTime())) return null;
+    const seconds = Math.max(0, Math.floor((end.getTime() - start.getTime()) / 1000));
+    if (seconds < 45) return "刚刚"; if (seconds < 3600) return `${Math.max(1, Math.round(seconds / 60))}分钟前`;
+    if (seconds < 86400) { const h = Math.floor(seconds / 3600); const m = Math.floor((seconds % 3600) / 60); return m >= 10 ? `${h}小时${m}分钟前` : `${h}小时前`; }
+    const d = Math.floor(seconds / 86400); const h = Math.floor((seconds % 86400) / 3600); return h >= 2 ? `${d}天${h}小时前` : `${d}天前`;
+  };
+  const rebuild = (attributeText: string) => {
+    const attrs = attrsOf(attributeText); const systemZone = safeZone(attrs.system_time_zone); const characterZone = safeZone(attrs.character_time_zone, systemZone);
+    const rows = [`当前系统时间：${dateTime(now, systemZone)} ${systemZone}，${weekday(now, systemZone)}（${dayPart(now, systemZone)}）`];
+    if (characterZone !== systemZone) { rows.push(`角色本地时间：${dateTime(now, characterZone)} ${characterZone}，${weekday(now, characterZone)}（${dayPart(now, characterZone)}）`, "判断角色作息、问候、深夜/清晨/工作时间时，优先使用角色本地时间。"); }
+    try {
+      const members = attrs.group_time_zones ? JSON.parse(decodeURIComponent(attrs.group_time_zones)) : [];
+      const memberRows = Array.isArray(members) ? members.flatMap(member => { const zone = safeZone(typeof member?.timeZone === "string" ? member.timeZone : "", systemZone); return member?.name && zone !== systemZone ? [`${member.name}：${dateTime(now, zone)} ${zone}，${weekday(now, zone)}（${dayPart(now, zone)}）`] : []; }) : [];
+      if (memberRows.length) rows.push("群成员本地时间：", ...memberRows, "判断每个角色作息、问候、深夜/清晨/工作时间时，优先使用该角色自己的本地时间。");
+    } catch { /* 老快照没有群时区数据 */ }
+    const userGap = elapsed(attrs.last_user_at, now); const assistantGap = elapsed(attrs.last_assistant_at, now); const latestGap = elapsed(attrs.latest_at, now);
+    if (userGap) rows.push(`用户最近一条消息：${userGap}`); if (assistantGap) rows.push(`你最近一条回复：${assistantGap}`); if (latestGap) rows.push(`最近一次真实聊天活动：${latestGap}`);
+    const latest = attrs.latest_at ? new Date(attrs.latest_at) : null; const previous = attrs.previous_at ? new Date(attrs.previous_at) : null;
+    if (latest && previous && Number.isFinite(latest.getTime()) && Number.isFinite(previous.getTime())) {
+      const gap = elapsed(previous.toISOString(), latest); if (latest.getTime() - previous.getTime() >= 1800000 && gap) rows.push(`最近两次真实聊天活动相隔：${gap}`);
+      if (dateKey(previous, characterZone) !== dateKey(latest, characterZone)) rows.push("最近两次真实聊天活动已经跨日，不要把之前那次误称为“刚刚”。");
+    }
+    if (latest && Number.isFinite(latest.getTime()) && dateKey(latest, characterZone) !== dateKey(now, characterZone)) rows.push("最近一次真实聊天活动与现在不在同一天，请正确使用“昨天/前天/几天前”等措辞。");
+    rows.push("这些是系统在任务真正执行时重新计算的时间事实。请自然体现在作息、问候、等待感和措辞中；不要机械报时或复述本段，也不要假装用户刚刚发过消息。");
+    return `<temporal_awareness${attributeText}>\n${rows.join("\n")}\n</temporal_awareness>`;
+  };
+  if (!value || typeof value !== "object") return;
+  for (const key of Array.isArray(value) ? value.keys() : Object.keys(value as Record<string, unknown>)) {
+    const record = value as Record<string | number, unknown>; const item = record[key as string | number];
+    if (typeof item === "string") record[key as string | number] = item.replace(TEMPORAL_AWARENESS_PATTERN, (_match, attrs: string) => rebuild(attrs));
+    else refreshTemporalAwareness(item, now);
+  }
+}
+
 /** 把截图插入位替换成真正的图片附件：找到含标记的文本段，按 marker 一分为三。
  *  三种服务商的 message 结构不同，与 push-generate 的 injectShortcutImage 同思路，
  *  区别是这里的 marker 藏在整段文本内部而非独占一段。 */
@@ -501,6 +552,7 @@ Deno.serve(async (request: Request) => {
         return json({ ok: false, error: "快照里找不到对话占位符，请到小手机重新保存一次屏幕速聊设置。" }, 500);
       }
       const requestBody = JSON.parse(bodyJson) as Record<string, unknown>;
+      refreshTemporalAwareness(requestBody, new Date());
       if (liveImage) {
         if (!injectImageAtMarker(requestBody, replyRequest.providerKind, IMAGE_MARKER, liveImage)) {
           replaceMarkerInStrings(requestBody, IMAGE_MARKER, ocr || "（截图注入失败，请结合上下文回应）");

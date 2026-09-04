@@ -46,6 +46,10 @@ const DEFAULT_COLOR_VALUES: Record<string, string> = {
   "--c-home-card": "rgba(255, 255, 255, 0.01)",
   "--c-home-border": "rgba(0, 0, 0, 0.06)",
   "--c-home-pink": "rgba(255, 160, 175, 0.5)",
+  "--widget-picker-bg": "rgba(246, 246, 248, 0.78)",
+  "--widget-picker-text": "#202124",
+  "--widget-picker-button-bg": "rgba(28, 28, 30, 0.78)",
+  "--widget-picker-button-text": "#ffffff",
 };
 
 function ColorField({ label, colorKey, draft, onChange }: { label: string, colorKey: string, draft: ThemeProfile, onChange: (k: string, v: string) => void }) {
@@ -117,6 +121,9 @@ export function DesktopCustomizer({ draft, onDraftChange, onApply, onClose }: De
   const outlineWidth = draft.cssOverrides["--desktop-outline-width"] || "1.5"
   const outlineOpacity = draft.cssOverrides["--desktop-outline-opacity"] || "1"
   const shadowOpacity = draft.cssOverrides["--desktop-global-shadow"] ?? "0.5"
+  const pickerBlur = parseFloat(draft.cssOverrides["--widget-picker-blur"] || "18")
+  const pickerRadius = parseFloat(draft.cssOverrides["--widget-picker-radius"] || "28")
+  const pickerButtonRadius = parseFloat(draft.cssOverrides["--widget-picker-button-radius"] || "18")
   return (
     <div 
       className="absolute bottom-0 left-0 right-0 z-[9999] bg-white/90 backdrop-blur-2xl border-t border-gray-200/50 shadow-[0_-10px_40px_rgba(0,0,0,0.1)] rounded-t-[32px] pb-6 overflow-hidden text-black customizer-drawer"
@@ -235,6 +242,30 @@ export function DesktopCustomizer({ draft, onDraftChange, onApply, onClose }: De
               <ColorField label="文字主色" colorKey="--c-home-text" draft={draft} onChange={handleUpdate} />
               <ColorField label="文字辅色" colorKey="--c-home-sub" draft={draft} onChange={handleUpdate} />
               <ColorField label="强调色" colorKey="--c-home-pink" draft={draft} onChange={handleUpdate} />
+            </div>
+
+            <div className="space-y-5 bg-gray-50/50 p-5 rounded-2xl shadow-inner border border-gray-100/50 text-gray-800">
+              <div>
+                <div className="text-[calc(13px*var(--app-text-scale,1))] font-medium mb-4">添加菜单装扮</div>
+                <div className="grid grid-cols-2 gap-x-4 gap-y-6 justify-items-center">
+                  <ColorField label="菜单背景" colorKey="--widget-picker-bg" draft={draft} onChange={handleUpdate} />
+                  <ColorField label="菜单文字" colorKey="--widget-picker-text" draft={draft} onChange={handleUpdate} />
+                  <ColorField label="按钮背景" colorKey="--widget-picker-button-bg" draft={draft} onChange={handleUpdate} />
+                  <ColorField label="按钮文字" colorKey="--widget-picker-button-text" draft={draft} onChange={handleUpdate} />
+                </div>
+              </div>
+              <label className="block space-y-2">
+                <span className="flex justify-between text-[calc(12px*var(--app-text-scale,1))]"><span>模糊度</span><span>{Math.round(pickerBlur)}px</span></span>
+                <input type="range" min="0" max="40" step="1" value={pickerBlur} onChange={e => handleUpdate("--widget-picker-blur", `${e.target.value}px`)} className="w-full customizer-slider" />
+              </label>
+              <label className="block space-y-2">
+                <span className="flex justify-between text-[calc(12px*var(--app-text-scale,1))]"><span>菜单圆角</span><span>{Math.round(pickerRadius)}px</span></span>
+                <input type="range" min="0" max="44" step="1" value={pickerRadius} onChange={e => handleUpdate("--widget-picker-radius", `${e.target.value}px`)} className="w-full customizer-slider" />
+              </label>
+              <label className="block space-y-2">
+                <span className="flex justify-between text-[calc(12px*var(--app-text-scale,1))]"><span>按钮圆角</span><span>{Math.round(pickerButtonRadius)}px</span></span>
+                <input type="range" min="0" max="32" step="1" value={pickerButtonRadius} onChange={e => handleUpdate("--widget-picker-button-radius", `${e.target.value}px`)} className="w-full customizer-slider" />
+              </label>
             </div>
           </div>
         )}

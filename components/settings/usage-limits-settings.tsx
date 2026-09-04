@@ -13,8 +13,10 @@ import {
     summarizeModelUsage,
     type ModelUsageCategory,
     type ModelUsageLimitSettings,
+    type ModelUsageEntry,
     type ModelUsageSummary,
 } from "@/lib/model-usage";
+import { loadAutoWakeLogs } from "@/lib/auto-wake-log";
 
 const CATEGORY_ROWS: Array<{
     category: ModelUsageCategory;
@@ -40,6 +42,14 @@ function usageText(summary: ModelUsageSummary): string {
     return `${summary.calls} 次 · ${estimate}${formatNumber(summary.totalTokens)} Token`;
 }
 
+function usageEntryText(entry: ModelUsageEntry): string {
+    const input = Math.max(0, entry.promptTokens || 0);
+    const cached = Math.min(input, Math.max(0, entry.cachedPromptTokens || 0));
+    const uncached = Math.max(0, input - cached);
+    const cacheRate = input > 0 ? `${(cached / input * 100).toFixed(1)}%` : "未提供";
+    return `输入 ${formatNumber(input)} · 缓存 ${formatNumber(cached)} · 未缓存 ${formatNumber(uncached)} · 输出 ${formatNumber(entry.completionTokens)} · 总计 ${formatNumber(entry.totalTokens)} · 缓存占比 ${cacheRate}`;
+}
+
 function clampInteger(value: string, fallback: number, min: number, max: number): number {
     const parsed = Math.round(Number(value));
     return Number.isFinite(parsed) ? Math.min(max, Math.max(min, parsed)) : fallback;
@@ -54,7 +64,11 @@ export function UsageLimitsSettings() {
     useEffect(() => {
         const refresh = () => setRefreshKey(value => value + 1);
         window.addEventListener("model-usage-updated", refresh);
-        return () => window.removeEventListener("model-usage-updated", refresh);
+        window.addEventListener("auto-wake-log-updated", refresh);
+        return () => {
+            window.removeEventListener("model-usage-updated", refresh);
+            window.removeEventListener("auto-wake-log-updated", refresh);
+        };
     }, []);
 
     const categoryUsage = useMemo(() => {
@@ -78,6 +92,8 @@ export function UsageLimitsSettings() {
         });
         return rows;
     }, [refreshKey]);
+    const recentEntries = useMemo(() => getModelUsageEntries(localUsageDayKey()).slice(-50).reverse(), [refreshKey]);
+    const wakeLogs = useMemo(() => loadAutoWakeLogs().slice(-30).reverse(), [refreshKey]);
 
     const persistLimits = useCallback((next: ModelUsageLimitSettings) => {
         setLimits(next);
@@ -162,6 +178,30 @@ export function UsageLimitsSettings() {
             </div>
 
             <section className="flex flex-col gap-2">
+                <div className="px-1">
+                    <h3 className="m-0 text-lg font-semibold">主动消息运行日志</h3>
+                    <p className="menu-desc m-0">只显示角色、触发原因、模型和发送/静默结果，不保存密钥。</p>
+                </div>
+                <div className="menu-group">
+                    {wakeLogs.length === 0 ? (
+                        <div className="menu-item"><span className="menu-desc">还没有自动醒来记录</span></div>
+                    ) : wakeLogs.map(log => (
+                        <div className="menu-item items-start" key={log.id}>
+                            <span className="settings-tools-menu-copy">
+                                <span className="menu-label appearance-menu-item-label">
+                                    {log.characterName} · {log.trigger} · {log.decision === "sent" ? "已发送" : log.decision === "silent" ? "已静默" : log.decision === "failed" ? "失败" : "已跳过"}
+                                </span>
+                                <span className="menu-desc settings-tools-menu-desc">
+                                    {new Date(log.timestamp).toLocaleString("zh-CN")} · {log.model || "未记录模型"}
+                                </span>
+                                <span className="menu-desc settings-tools-menu-desc">{log.detail}</span>
+                            </span>
+                        </div>
+                    ))}
+                </div>
+            </section>
+
+            <section className="flex flex-col gap-2">
                 <div className="px-1 flex items-end justify-between gap-3">
                     <div>
                         <h3 className="m-0 text-lg font-semibold">今日用量</h3>
@@ -170,7 +210,7 @@ export function UsageLimitsSettings() {
                 </div>
                 <div className="menu-group">
                     {CATEGORY_ROWS.map(({ category, label, description, icon: Icon, color }) => {
-                        const summary = categoryUsage.get(category) || { calls: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, hasEstimate: false };
+                        const summary = categoryUsage.get(category) || { calls: 0, promptTokens: 0, cachedPromptTokens: 0, completionTokens: 0, totalTokens: 0, hasEstimate: false };
                         return (
                             <div className="menu-item" key={category}>
                                 <span className="card-icon" style={{ "--icon-color": color } as React.CSSProperties}>
@@ -186,6 +226,31 @@ export function UsageLimitsSettings() {
                             </div>
                         );
                     })}
+                </div>
+            </section>
+
+            <section className="flex flex-col gap-2">
+                <div className="px-1">
+                    <h3 className="m-0 text-lg font-semibold">今日逐次明细</h3>
+                    <p className="menu-desc m-0">每个模型请求单独记录；缓存数据以服务商实际返回为准。</p>
+                </div>
+                <div className="menu-group">
+                    {recentEntries.length === 0 ? (
+                        <div className="menu-item"><span className="menu-desc">今天还没有模型调用记录</span></div>
+                    ) : recentEntries.map(entry => (
+                        <div className="menu-item items-start" key={entry.id}>
+                            <span className="settings-tools-menu-copy">
+                                <span className="menu-label appearance-menu-item-label">
+                                    {CATEGORY_ROWS.find(row => row.category === entry.category)?.label || "模型调用"}
+                                    {entry.label ? ` · ${entry.label}` : ""}
+                                </span>
+                                <span className="menu-desc settings-tools-menu-desc">
+                                    {entry.model || "未记录模型"} · {new Date(entry.timestamp).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                                </span>
+                                <span className="menu-desc settings-tools-menu-desc">{usageEntryText(entry)}</span>
+                            </span>
+                        </div>
+                    ))}
                 </div>
             </section>
 

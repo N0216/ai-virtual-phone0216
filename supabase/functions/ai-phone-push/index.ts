@@ -40,6 +40,12 @@ const SHORTCUT_RESULT_MODES = new Set(["none", "text", "image"]);
 const SHORTCUT_MAX_ARGS_BYTES = 16_000;
 const SHORTCUT_COMMAND_ID_PATTERN = /^cmd_[a-z0-9-]{20,80}$/i;
 const SHORTCUT_TICKET_PATTERN = /^[a-f0-9]{32}$/i;
+const EXECUTION_TASK_MARKER = "ai_phone_execution_task_v1";
+const EXECUTION_TASK_ID_PATTERN = /^exec_task_[a-f0-9-]{20,80}$/i;
+const EXECUTION_TASK_STATUSES = new Set(["pending", "running", "succeeded", "failed", "cancelled"]);
+const USER_VIEW_READ_POLICY_ID = "owner_view_read_policy";
+const USER_VIEW_READ_POLICY_MARKER = "ai_phone_user_view_read_policy_v1";
+const ROLE_PHONE_REFERENCE = /(?:aiphonecheckphonedb|ai_phone_checkphone_events_|checkphone-settings|checkphone:|\bvirtual_phone\b|角色手机|查手机)/iu;
 const SHORTCUT_COMMAND_SELECT = [
   "id", "user_id", "action_id", "action_name", "shortcut_name", "delivery_mode", "callback_token",
   "action_args", "result_mode", "status", "result", "error", "expires_at", "notified_at",
@@ -69,6 +75,88 @@ function redactLikelyCredential(value: string): string {
     .replace(/\bsbp_[A-Za-z0-9_-]{20,}\b/g, "[已隐藏 Supabase 令牌]")
     .replace(/\bsk-[A-Za-z0-9_-]{20,}\b/g, "[已隐藏 API 密钥]")
     .replace(/\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b/g, "[已隐藏访问令牌]");
+}
+
+function redactJson(value: unknown, depth = 0): unknown {
+  if (depth > 5) return null;
+  if (typeof value === "string") return redactLikelyCredential(cleanText(value, 30_000));
+  if (Array.isArray(value)) return value.slice(-80).map(item => redactJson(item, depth + 1));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .slice(0, 100)
+      .filter(([key]) => !/(?:api.?key|secret|token|cookie|authorization|password)/i.test(key))
+      .map(([key, item]) => [key, redactJson(item, depth + 1)]));
+  }
+  return value;
+}
+
+function isRolePhoneRelated(value: unknown, depth = 0): boolean {
+  if (depth > 6 || value == null) return false;
+  if (typeof value === "string") return ROLE_PHONE_REFERENCE.test(value);
+  if (Array.isArray(value)) return value.some(item => isRolePhoneRelated(item, depth + 1));
+  if (typeof value === "object") return Object.entries(value as Record<string, unknown>)
+    .some(([key, item]) => ROLE_PHONE_REFERENCE.test(key) || isRolePhoneRelated(item, depth + 1));
+  return false;
+}
+
+function sanitizeRolePhoneData(value: unknown, depth = 0): unknown {
+  if (depth > 6 || value == null) return value;
+  if (typeof value === "string") return ROLE_PHONE_REFERENCE.test(value) ? "[角色手机数据不可读]" : value;
+  if (Array.isArray(value)) return value
+    .filter(item => !isRolePhoneRelated(item))
+    .map(item => sanitizeRolePhoneData(item, depth + 1));
+  if (typeof value === "object") return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .filter(([key, item]) => !ROLE_PHONE_REFERENCE.test(key) && !isRolePhoneRelated(item))
+    .map(([key, item]) => [key, sanitizeRolePhoneData(item, depth + 1)]));
+  return value;
+}
+
+type ExecutionTask = {
+  task_id: string;
+  creator: string;
+  intent: string;
+  permission_scope: string[];
+  status: "pending" | "running" | "succeeded" | "failed" | "cancelled";
+  result: unknown | null;
+  tool_trace: Array<Record<string, unknown>>;
+  error: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+};
+
+function executionTaskFromRow(row: Record<string, unknown>): ExecutionTask | null {
+  const context = Array.isArray(row.recent_context) ? row.recent_context : [];
+  const value = context[0];
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const task = value as Record<string, unknown>;
+  if (task.marker !== EXECUTION_TASK_MARKER) return null;
+  const taskId = cleanText(task.task_id, 100);
+  const creator = cleanText(task.creator, 80);
+  const intent = cleanText(task.intent, 20_000);
+  const status = cleanText(task.status, 20);
+  if (!EXECUTION_TASK_ID_PATTERN.test(taskId) || !creator || !intent || !EXECUTION_TASK_STATUSES.has(status)) return null;
+  return {
+    task_id: taskId,
+    creator,
+    intent: redactLikelyCredential(intent),
+    permission_scope: (Array.isArray(task.permission_scope) ? task.permission_scope : [])
+      .map(item => cleanText(item, 160)).filter(Boolean).slice(0, 80),
+    status: status as ExecutionTask["status"],
+    result: sanitizeRolePhoneData(redactJson(task.result ?? null)),
+    tool_trace: (Array.isArray(task.tool_trace) ? task.tool_trace : [])
+      .filter(item => item && typeof item === "object" && !Array.isArray(item))
+      .filter(item => !isRolePhoneRelated(item))
+      .slice(-120).map(item => sanitizeRolePhoneData(redactJson(item)) as Record<string, unknown>),
+    error: cleanText(task.error, 4000) || null,
+    created_at: cleanText(task.created_at, 40) || cleanText(row.created_at, 40),
+    started_at: cleanText(task.started_at, 40) || null,
+    finished_at: cleanText(task.finished_at, 40) || null,
+  };
+}
+
+function executionTaskContext(task: ExecutionTask): unknown[] {
+  return [{ marker: EXECUTION_TASK_MARKER, ...task }];
 }
 
 function randomHex(size: number): string {
@@ -569,14 +657,40 @@ Deno.serve(async (request: Request) => {
         "ai_phone_cloud_meta?id=eq.personal-cloud&select=schema_version&limit=1",
       ));
       const schemaVersion = Number(meta[0]?.schema_version) || 1;
+      let schemaV6Health: Record<string, unknown> | null = null;
+      if (schemaVersion >= 6) {
+        const healthResponse = await rest("rpc/ai_phone_schema_v6_health", {
+          method: "POST",
+          body: JSON.stringify({}),
+        });
+        if (healthResponse.ok) {
+          schemaV6Health = await readJson<Record<string, unknown>>(healthResponse);
+        }
+        if (schemaV6Health?.ready !== true) {
+          return json({
+            ok: false,
+            error: "个人云数据库标记为 v6，但表结构、约束、RLS 或权限验证未通过。",
+            service: "ai-phone-personal-push",
+            version: 2,
+            schemaVersion,
+            schemaHealth: schemaV6Health,
+            capabilities: [],
+          }, 503);
+        }
+      }
       return json({
         ok: true,
         service: "ai-phone-personal-push",
         version: 2,
         schemaVersion,
+        schemaHealth: schemaV6Health,
         capabilities: [
           ...(schemaVersion >= 3 ? ["screen-chat-continuous"] : []),
           ...(schemaVersion >= 4 ? ["role-memory-sync", "role-memory-mcp"] : []),
+          ...(schemaVersion >= 4 ? ["execution-handoff-v1"] : []),
+          ...(schemaVersion >= 4 ? ["user-view-read-policy-v1"] : []),
+          ...(schemaVersion >= 5 ? ["role-events-sync", "role-query-audit"] : []),
+          ...(schemaVersion >= 6 && schemaV6Health?.ready === true ? ["role-call-transcript-chunks"] : []),
         ],
       });
     }
@@ -589,6 +703,126 @@ Deno.serve(async (request: Request) => {
         mcpUrl: `${supabaseUrl}/functions/v1/role-memory-mcp`,
         token: config.role_memory_token,
       });
+    }
+
+    if (action === "user-view-read-policy" && request.method === "GET") {
+      const rows = await readJson<Array<Record<string, unknown>>>(await rest(
+        `role_handoffs?user_id=eq.${OWNER_ID}&id=eq.${USER_VIEW_READ_POLICY_ID}&select=recent_context&limit=1`,
+      ));
+      const value = Array.isArray(rows[0]?.recent_context) ? rows[0].recent_context[0] as Record<string, unknown> | undefined : undefined;
+      const enabled = value?.marker === USER_VIEW_READ_POLICY_MARKER ? value.enabled !== false : true;
+      return json({ ok: true, enabled });
+    }
+
+    if (action === "user-view-read-policy" && request.method === "POST") {
+      const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+      if (typeof body.enabled !== "boolean") return json({ ok: false, error: "enabled 必须是布尔值。" }, 400);
+      const now = new Date().toISOString();
+      await readJson(await rest("role_handoffs", {
+        method: "POST",
+        headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+        body: JSON.stringify([{
+          id: USER_VIEW_READ_POLICY_ID, user_id: OWNER_ID, role_id: "access-policy", role_name: "Eiren 访问策略",
+          source: "phone", summary: body.enabled ? "user_view_read enabled" : "user_view_read revoked",
+          recent_context: [{ marker: USER_VIEW_READ_POLICY_MARKER, enabled: body.enabled, updated_at: now }],
+          important_facts: [], open_topics: [], last_chat_at: now,
+        }]),
+      }));
+      return json({ ok: true, enabled: body.enabled, updatedAt: now });
+    }
+
+    if (action === "execution-task-list" && request.method === "GET") {
+      const status = cleanText(url.searchParams.get("status"), 20) || "pending";
+      if (!EXECUTION_TASK_STATUSES.has(status)) return json({ ok: false, error: "任务状态无效。" }, 400);
+      const rows = await readJson<Array<Record<string, unknown>>>(await rest(
+        `role_handoffs?user_id=eq.${OWNER_ID}&id=like.exec_task_*`
+        + "&select=id,recent_context,created_at&order=created_at.asc&limit=80",
+      ));
+      const parsedTasks = rows.map(executionTaskFromRow).filter((task): task is ExecutionTask => Boolean(task));
+      const staleBefore = Date.now() - 60 * 60 * 1000;
+      for (const task of parsedTasks) {
+        if (task.status !== "running" || !task.started_at || Date.parse(task.started_at) >= staleBefore) continue;
+        const now = new Date().toISOString();
+        const failed: ExecutionTask = { ...task, status: "failed", error: "执行端中断或超过一小时未完成", finished_at: now };
+        await rest(
+          `role_handoffs?user_id=eq.${OWNER_ID}&id=eq.${encodeURIComponent(task.task_id)}&recent_context->0->>status=eq.running`,
+          { method: "PATCH", headers: { Prefer: "return=minimal" }, body: JSON.stringify({ recent_context: executionTaskContext(failed), last_chat_at: now }) },
+        ).catch(() => undefined);
+        Object.assign(task, failed);
+      }
+      const tasks = parsedTasks.filter(task => task.status === status);
+      return json({ ok: true, tasks });
+    }
+
+    if (action === "execution-task-read" && request.method === "GET") {
+      const taskId = cleanText(url.searchParams.get("taskId"), 100);
+      if (!EXECUTION_TASK_ID_PATTERN.test(taskId)) return json({ ok: false, error: "任务 ID 无效。" }, 400);
+      const rows = await readJson<Array<Record<string, unknown>>>(await rest(
+        `role_handoffs?user_id=eq.${OWNER_ID}&id=eq.${encodeURIComponent(taskId)}&select=id,recent_context,created_at&limit=1`,
+      ));
+      const task = rows[0] ? executionTaskFromRow(rows[0]) : null;
+      return task ? json({ ok: true, task }) : json({ ok: false, error: "任务不存在。" }, 404);
+    }
+
+    if (action === "execution-task-claim" && request.method === "POST") {
+      const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+      const taskId = cleanText(body.taskId, 100);
+      if (!EXECUTION_TASK_ID_PATTERN.test(taskId)) return json({ ok: false, error: "任务 ID 无效。" }, 400);
+      const rows = await readJson<Array<Record<string, unknown>>>(await rest(
+        `role_handoffs?user_id=eq.${OWNER_ID}&id=eq.${encodeURIComponent(taskId)}&select=id,recent_context,created_at&limit=1`,
+      ));
+      const task = rows[0] ? executionTaskFromRow(rows[0]) : null;
+      if (!task) return json({ ok: false, error: "任务不存在。" }, 404);
+      if (task.status !== "pending") return json({ ok: false, error: `任务不能领取，当前状态：${task.status}` }, 409);
+      const now = new Date().toISOString();
+      const next: ExecutionTask = { ...task, status: "running", started_at: now, finished_at: null, error: null };
+      const path = `role_handoffs?user_id=eq.${OWNER_ID}&id=eq.${encodeURIComponent(taskId)}`
+        + `&recent_context->0->>status=eq.pending&select=id,recent_context,created_at`;
+      const claimed = await readJson<Array<Record<string, unknown>>>(await rest(path, {
+        method: "PATCH", headers: { Prefer: "return=representation" },
+        body: JSON.stringify({ recent_context: executionTaskContext(next), last_chat_at: now }),
+      }));
+      const claimedTask = claimed[0] ? executionTaskFromRow(claimed[0]) : null;
+      if (!claimedTask) return json({ ok: false, error: "任务已被其他执行端领取或取消。" }, 409);
+      return json({ ok: true, task: claimedTask });
+    }
+
+    if (action === "execution-task-finish" && request.method === "POST") {
+      const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+      const taskId = cleanText(body.taskId, 100);
+      const requestedStatus = cleanText(body.status, 20);
+      if (!EXECUTION_TASK_ID_PATTERN.test(taskId)) return json({ ok: false, error: "任务 ID 无效。" }, 400);
+      if (!["succeeded", "failed"].includes(requestedStatus)) return json({ ok: false, error: "只能写回成功或失败状态。" }, 400);
+      const rows = await readJson<Array<Record<string, unknown>>>(await rest(
+        `role_handoffs?user_id=eq.${OWNER_ID}&id=eq.${encodeURIComponent(taskId)}&select=id,recent_context,created_at&limit=1`,
+      ));
+      const task = rows[0] ? executionTaskFromRow(rows[0]) : null;
+      if (!task) return json({ ok: false, error: "任务不存在。" }, 404);
+      if (task.status !== "running") return json({ ok: false, error: `任务不能写回，当前状态：${task.status}` }, 409);
+      const now = new Date().toISOString();
+      const safeResult = requestedStatus === "succeeded" ? redactJson(body.result ?? null) : null;
+      const safeTrace = (Array.isArray(body.tool_trace) ? body.tool_trace : []).slice(-120)
+        .map(item => redactJson(item) as Record<string, unknown>);
+      if (JSON.stringify({ result: safeResult, tool_trace: safeTrace }).length > 700_000) {
+        return json({ ok: false, error: "任务结果过大，未写回；请先压缩结果。" }, 413);
+      }
+      const next: ExecutionTask = {
+        ...task,
+        status: requestedStatus as "succeeded" | "failed",
+        result: safeResult,
+        tool_trace: safeTrace,
+        error: requestedStatus === "failed" ? cleanText(body.error, 4000) || "执行失败" : null,
+        finished_at: now,
+      };
+      const path = `role_handoffs?user_id=eq.${OWNER_ID}&id=eq.${encodeURIComponent(taskId)}`
+        + `&recent_context->0->>status=eq.running&select=id,recent_context,created_at`;
+      const finished = await readJson<Array<Record<string, unknown>>>(await rest(path, {
+        method: "PATCH", headers: { Prefer: "return=representation" },
+        body: JSON.stringify({ recent_context: executionTaskContext(next), last_chat_at: now }),
+      }));
+      const finishedTask = finished[0] ? executionTaskFromRow(finished[0]) : null;
+      if (!finishedTask) return json({ ok: false, error: "任务已被取消或状态已改变。" }, 409);
+      return json({ ok: true, task: finishedTask });
     }
 
     if (action === "role-context" && request.method === "GET") {
@@ -708,6 +942,147 @@ Deno.serve(async (request: Request) => {
         ));
       }
       return json({ ok: true, upserted: entries.length, deleted: deletedIds.length });
+    }
+
+    if (action === "role-call-transcript-sync" && request.method === "POST") {
+      const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+      const roleId = cleanText(body.roleId, 160);
+      const callId = cleanText(body.callId, 220);
+      const transcriptVersion = cleanText(body.transcriptVersion, 100);
+      const totalChunks = Math.max(0, Math.min(100_000, Number(body.totalChunks) || 0));
+      const complete = body.complete === true;
+      if (!roleId || !callId || !transcriptVersion) return json({ ok: false, error: "通话转录标识无效。" }, 400);
+      const chunks = (Array.isArray(body.chunks) ? body.chunks : []).slice(0, 40)
+        .map(value => value && typeof value === "object" ? value as Record<string, unknown> : {})
+        .map(value => {
+          const chunkIndex = Number(value.chunkIndex);
+          const partIndex = Number(value.partIndex);
+          const partCount = Number(value.partCount);
+          const speaker = cleanText(value.role, 20);
+          const occurredAt = cleanText(value.createdAt, 40);
+          const rawContent = typeof value.content === "string" ? value.content : "";
+          if (!Number.isInteger(chunkIndex) || chunkIndex < 0 || chunkIndex >= totalChunks) return null;
+          if (!Number.isInteger(partIndex) || !Number.isInteger(partCount) || partIndex < 0 || partCount < 1 || partIndex >= partCount) return null;
+          if (!["user", "assistant"].includes(speaker) || !Number.isFinite(Date.parse(occurredAt))) return null;
+          if (Array.from(rawContent).length > 8_000) return null;
+          return {
+            user_id: OWNER_ID, role_id: roleId, call_id: callId, transcript_version: transcriptVersion,
+            chunk_index: chunkIndex, entry_id: cleanText(value.entryId, 220) || `entry_${chunkIndex}`,
+            speaker, occurred_at: new Date(occurredAt).toISOString(),
+            sender_name: cleanText(value.senderName, 120) || null,
+            sender_character_id: cleanText(value.senderCharacterId, 180) || null,
+            part_index: partIndex, part_count: partCount,
+            content: redactLikelyCredential(rawContent), updated_at: new Date().toISOString(),
+          };
+        }).filter((value): value is NonNullable<typeof value> => value !== null);
+      if (chunks.length !== (Array.isArray(body.chunks) ? body.chunks.slice(0, 40).length : 0)) {
+        return json({ ok: false, error: "通话转录分片格式无效。" }, 400);
+      }
+      if (chunks.length > 0) {
+        await readJson(await rest("role_call_transcript_chunks?on_conflict=user_id,role_id,call_id,transcript_version,chunk_index", {
+          method: "POST", headers: { Prefer: "resolution=merge-duplicates,return=minimal" }, body: JSON.stringify(chunks),
+        }));
+      }
+      if (complete) {
+        const countResponse = await rest(
+          `role_call_transcript_chunks?user_id=eq.${OWNER_ID}&role_id=eq.${encodeURIComponent(roleId)}`
+          + `&call_id=eq.${encodeURIComponent(callId)}&transcript_version=eq.${encodeURIComponent(transcriptVersion)}&select=chunk_index&limit=1`,
+          { headers: { Prefer: "count=exact" } },
+        );
+        if (!countResponse.ok) await readJson(countResponse);
+        const storedCount = Number((countResponse.headers.get("content-range") || "").split("/").pop());
+        if (storedCount !== totalChunks) return json({ ok: false, error: "通话转录分片尚未完整到达。" }, 409);
+      }
+      return json({ ok: true, upserted: chunks.length, complete, totalChunks });
+    }
+
+    if (action === "role-call-transcript-finalize" && request.method === "POST") {
+      const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+      const roleId = cleanText(body.roleId, 160);
+      const callId = cleanText(body.callId, 220);
+      const transcriptVersion = cleanText(body.transcriptVersion, 100);
+      if (!roleId || !callId || !transcriptVersion) return json({ ok: false, error: "通话转录标识无效。" }, 400);
+      const parents = await readJson<Array<{ metadata?: Record<string, unknown> }>>(await rest(
+        `role_events?user_id=eq.${OWNER_ID}&role_id=eq.${encodeURIComponent(roleId)}`
+        + `&source_type=eq.call&source_id=eq.${encodeURIComponent(callId)}&select=metadata&limit=1`,
+      ));
+      const activeVersion = cleanText(parents[0]?.metadata?.transcriptVersion, 100);
+      if (activeVersion !== transcriptVersion) {
+        return json({ ok: false, error: "父通话记录尚未切换到该转录版本，拒绝清理旧版本。" }, 409);
+      }
+      await readJson(await rest(
+        `role_call_transcript_chunks?user_id=eq.${OWNER_ID}&role_id=eq.${encodeURIComponent(roleId)}`
+        + `&call_id=eq.${encodeURIComponent(callId)}&transcript_version=neq.${encodeURIComponent(transcriptVersion)}`,
+        { method: "DELETE", headers: { Prefer: "return=minimal" } },
+      ));
+      return json({ ok: true, activeVersion: transcriptVersion });
+    }
+
+    if (action === "role-events-sync" && request.method === "POST") {
+      const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+      const allowedSources = new Set(["offline_chat", "custom_app", "diary", "moments", "virtual_phone", "call"]);
+      const events = (Array.isArray(body.events) ? body.events : []).slice(0, 100)
+        .map(value => value && typeof value === "object" ? value as Record<string, unknown> : {})
+        .map(value => {
+          const roleId = cleanText(value.roleId, 160);
+          const sourceType = cleanText(value.sourceType, 40);
+          const sourceId = cleanText(value.sourceId, 220);
+          const eventAt = cleanText(value.eventAt, 40);
+          const content = redactLikelyCredential(cleanText(value.content, 30_000));
+          if (!roleId || !sourceId || !content || !allowedSources.has(sourceType)) return null;
+          if (!Number.isFinite(Date.parse(eventAt))) return null;
+          return {
+            user_id: OWNER_ID,
+            role_id: roleId,
+            role_name: cleanText(value.roleName, 120) || null,
+            source_type: sourceType,
+            source_id: sourceId,
+            title: redactLikelyCredential(cleanText(value.title, 180)) || "个人端记录",
+            content,
+            metadata: value.metadata && typeof value.metadata === "object" ? redactJson(value.metadata) : {},
+            event_at: new Date(eventAt).toISOString(),
+            updated_at: new Date().toISOString(),
+          };
+        }).filter((value): value is NonNullable<typeof value> => value !== null);
+      if (JSON.stringify(events).length > 900_000) return json({ ok: false, error: "同步资料过大。" }, 413);
+      if (events.length > 0) {
+        await readJson(await rest("role_events?on_conflict=user_id,role_id,source_type,source_id", {
+          method: "POST",
+          headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+          body: JSON.stringify(events),
+        }));
+      }
+      const deletes = (Array.isArray(body.deletes) ? body.deletes : []).slice(0, 200)
+        .map(value => value && typeof value === "object" ? value as Record<string, unknown> : {})
+        .map(value => ({
+          roleId: cleanText(value.roleId, 160),
+          sourceType: cleanText(value.sourceType, 40),
+          sourceId: cleanText(value.sourceId, 220),
+        }))
+        .filter(value => value.roleId && allowedSources.has(value.sourceType) && value.sourceId);
+      for (const entry of deletes) {
+        await readJson(await rest(
+          `role_events?user_id=eq.${OWNER_ID}&role_id=eq.${encodeURIComponent(entry.roleId)}`
+          + `&source_type=eq.${encodeURIComponent(entry.sourceType)}&source_id=eq.${encodeURIComponent(entry.sourceId)}`,
+          { method: "DELETE", headers: { Prefer: "return=minimal" } },
+        ));
+        if (entry.sourceType === "call") {
+          await readJson(await rest(
+            `role_call_transcript_chunks?user_id=eq.${OWNER_ID}&role_id=eq.${encodeURIComponent(entry.roleId)}&call_id=eq.${encodeURIComponent(entry.sourceId)}`,
+            { method: "DELETE", headers: { Prefer: "return=minimal" } },
+          ));
+        }
+      }
+      return json({ ok: true, upserted: events.length, deleted: deletes.length });
+    }
+
+    if (action === "role-query-logs" && request.method === "GET") {
+      const rows = await readJson<unknown[]>(await rest(
+        `role_query_logs?user_id=eq.${OWNER_ID}`
+        + "&select=id,operation_label,role_name,source_label,query_text,result_count,detail,queried_at"
+        + "&order=queried_at.desc&limit=100",
+      ));
+      return json({ ok: true, logs: rows });
     }
 
     if (action === "public-key" && request.method === "GET") {
@@ -1119,6 +1494,20 @@ $CRON$)`);
         + `&order=created_at.desc&limit=${limit}`,
       ));
       return json({ ok: true, commands: rows.map(toPublicShortcutCommand) });
+    }
+
+    if (action === "shortcut-cancel" && request.method === "POST") {
+      const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+      const commandId = cleanText(body.commandId, 100);
+      if (!SHORTCUT_COMMAND_ID_PATTERN.test(commandId)) return json({ ok: false, error: "命令 ID 无效。" }, 400);
+      const now = new Date().toISOString();
+      const rows = await readJson<ShortcutCommandRow[]>(await rest(
+        `push_shortcut_commands?id=eq.${encodeURIComponent(commandId)}&user_id=eq.${OWNER_ID}`
+        + `&status=in.(pending,claimed)&select=${SHORTCUT_COMMAND_SELECT}`,
+        { method: "PATCH", headers: { Prefer: "return=representation" }, body: JSON.stringify({ status: "cancelled", completed_at: now, updated_at: now }) },
+      ));
+      if (!rows[0]) return json({ ok: false, error: "命令已完成、已取消或不存在。" }, 409);
+      return json({ ok: true, command: toPublicShortcutCommand(rows[0]) });
     }
 
     if (action === "test" && request.method === "POST") {

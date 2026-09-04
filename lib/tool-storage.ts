@@ -580,6 +580,37 @@ export function getEnabledTools(
     return characterId ? filterToolsForCharacter(tools, characterId, usage) : tools;
 }
 
+export type ToolPermissionEntry = { key: string; name: string; description: string; source: EnabledTool["source"] };
+
+/** Flatten globally enabled tool groups into the exact leaf permission keys used by execution. */
+export function listToolPermissionEntries(appId = "chat"): ToolPermissionEntry[] {
+    const entries: ToolPermissionEntry[] = [];
+    for (const group of buildGloballyEnabledTools(appId)) {
+        if (group.restTools?.length) {
+            entries.push(...group.restTools.map(tool => ({ key: restToolPermissionKey(tool.id), name: tool.name, description: tool.description, source: "rest" as const })));
+            continue;
+        }
+        if (group.compositeTools?.length) {
+            entries.push(...group.compositeTools.map(tool => ({ key: compositeToolPermissionKey(tool.id), name: tool.name, description: tool.description, source: "composite" as const })));
+            continue;
+        }
+        if (group.mcpTools?.length) {
+            entries.push(...group.mcpTools.map(tool => ({ key: mcpToolPermissionKey(group.sourceId, tool.name), name: tool.name, description: tool.description || "MCP 工具", source: "mcp" as const })));
+            continue;
+        }
+        if (group.customAppTools?.length) {
+            entries.push(...group.customAppTools.map(tool => ({ key: customAppToolPermissionKey(tool.appId, tool.id), name: tool.name, description: tool.description || `来自「${tool.appName}」`, source: "custom_app" as const })));
+            continue;
+        }
+        if (group.internalTools?.length) {
+            entries.push(...group.internalTools.map(tool => ({ key: internalSubToolPermissionKey(group.sourceId, tool.name), name: tool.name, description: tool.description, source: "internal" as const })));
+            continue;
+        }
+        entries.push({ key: resolvedToolPermissionKey(group), name: group.name, description: group.description, source: group.source });
+    }
+    return entries.filter((entry, index) => entries.findIndex(candidate => candidate.key === entry.key) === index);
+}
+
 export function findEnabledToolForSchema(
     name: string,
     appId?: string,

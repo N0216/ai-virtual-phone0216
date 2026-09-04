@@ -8,6 +8,9 @@ import type { DataModuleDefinition, DataModuleId } from "./types";
 const RESERVED_LOCAL_STORAGE_KEYS = [
   "ai_phone_idb_migrated_v1",
   "ai_phone_settings_idb_migrated_v1",
+  // 相册清单和主题素材库中的 photo_album 图片必须成对备份，不能落入可选缓存。
+  "ai_phone_photo_album_v1",
+  "ai-phone:pwa-app-icon:v1",
 ];
 
 // Never put the credential used to reach the cloud inside that same cloud
@@ -94,6 +97,11 @@ const PRIMARY_DATA_MODULES: DataModuleDefinition[] = [
           "ai_phone_composite_tool_packages_v1",
           "ai_phone_mcp_servers_v1",
           "ai_phone_internal_capabilities_v1",
+          "ai_phone_character_tool_policies_v1",
+          "ai_phone_deepseek_execution_assistant_v1",
+          "ai_phone_device_operation_log_v1",
+          "ai_phone_auto_wake_logs_v1",
+          "ai_phone_settings_undo_v1",
           "weixin_bots_v1",
           "weixin_keepalive_v1",
           "weixin_cloud_sync_config_v1",
@@ -150,6 +158,7 @@ const PRIMARY_DATA_MODULES: DataModuleDefinition[] = [
           "ai_phone_widgets_v1",
           "ai_phone_diy_templates_v1",
           "ai_phone_theme_profile_v1",
+          "ai_phone_entry_experience_v1",
           "css-schemes-v1",
           "chat-app-custom-css",
           "music-custom-css",
@@ -163,6 +172,11 @@ const PRIMARY_DATA_MODULES: DataModuleDefinition[] = [
           "ai_phone_css_assets_v1",
           "music-custom-bg-v1",
         ],
+      },
+      {
+        type: "localStorage",
+        label: "小手机相册与主屏幕图标",
+        keys: ["ai_phone_photo_album_v1", "ai-phone:pwa-app-icon:v1"],
       },
     ],
   },

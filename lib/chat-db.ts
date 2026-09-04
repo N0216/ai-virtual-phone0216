@@ -5,12 +5,39 @@
 import Dexie from "dexie";
 import type { ChatMessage, ChatSession, ChatContact } from "./chat-storage";
 
+export type StoredCallTranscriptEntry = {
+    id: string;
+    role: "user" | "assistant";
+    content: string;
+    createdAt: string;
+    senderName?: string;
+    senderCharacterId?: string;
+};
+
+export type StoredCallRecordState = "ongoing" | "ended" | "cancelled" | "rejected" | "missed";
+
+export type StoredCallRecord = {
+    id: string;
+    sessionId: string;
+    type: "voice" | "video";
+    initiatorRole: "user" | "assistant";
+    startedAt: string;
+    endedAt?: string;
+    duration: string;
+    state: StoredCallRecordState;
+    transcript: StoredCallTranscriptEntry[];
+    legacyStartMessageId?: string;
+    legacyEndMessageId?: string;
+    updatedAt: string;
+};
+
 // ── Database Schema ──────────────────────────────
 
 class ChatDatabase extends Dexie {
     messages!: Dexie.Table<ChatMessage, string>;
     sessions!: Dexie.Table<ChatSession, string>;
     contacts!: Dexie.Table<ChatContact, string>;
+    callRecords!: Dexie.Table<StoredCallRecord, string>;
 
     constructor() {
         super("AiPhoneChatDB");
@@ -18,6 +45,12 @@ class ChatDatabase extends Dexie {
             messages: "id, sessionId, createdAt",
             sessions: "id, contactId",
             contacts: "id, characterId",
+        });
+        this.version(2).stores({
+            messages: "id, sessionId, createdAt",
+            sessions: "id, contactId",
+            contacts: "id, characterId",
+            callRecords: "id, sessionId, startedAt, state, [sessionId+startedAt]",
         });
     }
 }
@@ -148,6 +181,18 @@ export function dbPutMessage(msg: ChatMessage): void {
 
 export function dbPutMessages(msgs: ChatMessage[]): void {
     chatDb.messages.bulkPut(msgs).catch(err => console.warn("[ChatDB] bulkPut messages failed:", err));
+}
+
+export function dbPutCallRecord(record: StoredCallRecord): Promise<void> {
+    return chatDb.callRecords.put(record).then(() => undefined);
+}
+
+export function dbGetCallRecordsBySession(sessionId: string): Promise<StoredCallRecord[]> {
+    return chatDb.callRecords.where("sessionId").equals(sessionId).sortBy("startedAt");
+}
+
+export function dbDeleteCallRecordsBySession(sessionId: string): Promise<void> {
+    return chatDb.callRecords.where("sessionId").equals(sessionId).delete().then(() => undefined);
 }
 
 export function dbDeleteMessage(id: string): void {

@@ -1,7 +1,7 @@
 "use client";
 
 import { forwardRef, Fragment, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ChatSession, ChatMessage, CHAT_APP_SETTINGS_UPDATED_EVENT, CHAT_INITIAL_VISIBLE_MESSAGE_COUNT, CHAT_LOAD_MORE_MESSAGE_COUNT, CHAT_REQUEST_REPLY_EVENT, loadChatAppSettings, loadChatMessages, loadChatContacts, loadChatSessions, saveChatSessions, pushChatMessage, updateChatMessage, deleteChatMessage, deleteChatMessagesFrom, deleteChatMessagesByIds, retractChatMessage, editChatMessage, updateMessageMediaData, replaceResponseBatchWithParts, replaceGroupResponseRound, isReadingDiscussMessage, isSystemInstructionMessage, createResponseBatchId, createResponseRoundId, getLatestStateValues, getLatestCharacterStateValues, compareChatMessages } from "@/lib/chat-storage";
+import { ChatSession, ChatMessage, CHAT_APP_SETTINGS_UPDATED_EVENT, CHAT_INITIAL_VISIBLE_MESSAGE_COUNT, CHAT_LOAD_MORE_MESSAGE_COUNT, CHAT_REQUEST_REPLY_EVENT, loadChatAppSettings, loadChatMessages, loadChatContacts, loadChatSessions, saveChatSessions, pushChatMessage, updateChatMessage, deleteChatMessage, deleteChatMessagesFrom, deleteChatMessagesByIds, retractChatMessage, editChatMessage, updateMessageMediaData, replaceResponseBatchWithParts, replaceGroupResponseRound, isReadingDiscussMessage, isSystemInstructionMessage, createResponseBatchId, createResponseRoundId, getLatestStateValues, getLatestCharacterStateValues, compareChatMessages, getTotalChatUnreadCount } from "@/lib/chat-storage";
 import type { StateValue } from "@/lib/chat-storage";
 import { parseStateValues, mergeStateValues } from "@/lib/state-value-parser";
 import { parseAIResponse, type ParsedMessagePart } from "@/lib/rich-message-parser";
@@ -104,6 +104,19 @@ const ACTION_MEDIA_TYPES = new Set(["poke", "accept_red_packet", "decline_red_pa
 function canCarryFoldedPanel(part: { content?: string; mediaType?: ChatMessage["mediaType"] }): boolean {
     if (part.mediaType === "poke" || part.mediaType === "group_admin_notice") return false;
     return !CALL_SYS_RE.test(part.content || "");
+}
+
+/** Repair already-saved replies from older parsers that leaked an unclosed [内心] block into a bubble. */
+function repairLegacyInnerMonologueForDisplay(msg: RenderChatMessage): RenderChatMessage {
+    if (msg.role === "user" || msg.innerMonologue || !/^\s*\[(?:内心|内心独白|心声)\]/i.test(msg.content || "")) return msg;
+    const parsed = parseAIResponse(msg.content, msg.stateValues || []);
+    if (!parsed.innerMonologue || parsed.parts.some(part => part.mediaType)) return msg;
+    return {
+        ...msg,
+        content: parsed.parts.map(part => part.content).filter(Boolean).join("\n\n"),
+        innerMonologue: parsed.innerMonologue,
+        freshStateValues: msg.freshStateValues ?? parsed.freshStateValues,
+    };
 }
 function uiRole(msg: ChatMessage): string {
     if (msg.role === "system" || ACTION_MEDIA_TYPES.has(msg.mediaType || "")) return "system";
@@ -1075,6 +1088,12 @@ const OfflineTextInputBar = memo(forwardRef<OfflineTextInputHandle, {
 
 export function ChatRoom({ session, onBack }: ChatRoomProps) {
     const [liveCSS, setLiveCSS] = useState(session.customCSS || "");
+    const [otherUnreadCount, setOtherUnreadCount] = useState(() => getTotalChatUnreadCount(session.id));
+    useEffect(() => {
+        const refreshUnread = () => setOtherUnreadCount(getTotalChatUnreadCount(session.id));
+        window.addEventListener("chat-unread-updated", refreshUnread);
+        return () => window.removeEventListener("chat-unread-updated", refreshUnread);
+    }, [session.id]);
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [transientMessages, setTransientMessages] = useState<ChatMessage[]>([]);
     const [stickerReady, setStickerReady] = useState(false);
@@ -4946,7 +4965,15 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
     // Build a map: startMsgId → { startIdx, endIdx, duration }
     // and a set of all message indices that belong to a voice call group
     const voiceCallGroups = useMemo(() => {
-        const groups: { startId: string; startIdx: number; endIdx: number; duration: string; callType: "voice" | "video" }[] = [];
+        const groups: {
+            startId: string;
+            startIdx: number;
+            endIdx: number;
+            duration: string;
+            callType: "voice" | "video";
+            initiatorRole: "user" | "assistant";
+            endState: "ended" | "cancelled" | "rejected" | "missed";
+        }[] = [];
         const memberSet = new Set<number>();
 
         let i = 0;
@@ -4961,21 +4988,31 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                 const kw = isVideoStart ? "视频通话" : "语音通话";
                 let endIdx = -1;
                 let duration = "";
+                let endState: "ended" | "cancelled" | "rejected" | "missed" = "ended";
                 for (let j = i + 1; j < projectedMessages.length; j++) {
                     if (uiRole(projectedMessages[j]) !== "system") continue;
                     const c = projectedMessages[j].content;
                     // Another call start → separate call, stop
                     if (c.includes("发起了语音通话") || c.includes("发起了视频通话")) break;
                     // Call end: 挂断/拒绝/取消（兼容"群语音通话"/"群视频通话"）
-                    if (c.includes(`挂断了${kw}`) || c.includes(`挂断了群${kw}`) || c.includes(`拒绝了${kw}`) || c.includes(`拒绝了群${kw}`) || c.includes(`取消了${kw}`) || c.includes(`取消了群${kw}`)) {
+                    if (c.includes(`挂断了${kw}`) || c.includes(`挂断了群${kw}`) || c.includes(`拒绝了${kw}`) || c.includes(`拒绝了群${kw}`) || c.includes(`取消了${kw}`) || c.includes(`取消了群${kw}`) || c.includes(`未接听${kw}`) || c.includes(`未接听群${kw}`)) {
                         endIdx = j;
                         const match = c.match(/时长\s*(\d+:\d+)/);
-                        duration = match ? match[1] : "";
+                        duration = projectedMessages[j].mediaData?.callDuration || (match ? match[1] : "");
+                        endState = c.includes("拒绝了") ? "rejected" : c.includes("取消了") ? "cancelled" : c.includes("未接听") ? "missed" : "ended";
                         break;
                     }
                 }
                 if (endIdx > i) {
-                    groups.push({ startId: msg.id, startIdx: i, endIdx, duration, callType });
+                    groups.push({
+                        startId: msg.id,
+                        startIdx: i,
+                        endIdx,
+                        duration,
+                        callType,
+                        initiatorRole: msg.role === "assistant" ? "assistant" : "user",
+                        endState,
+                    });
                     for (let k = i; k <= endIdx; k++) memberSet.add(k);
                     i = endIdx + 1;
                     continue;
@@ -5215,6 +5252,11 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                 <div className="page-header-content">
                     <button className="page-back-btn" type="button" onClick={onBack} aria-label="返回">
                         <ChevronLeft size={24} strokeWidth={1.5} />
+                        {otherUnreadCount > 0 && (
+                            <span className="chat-back-unread-badge" data-unread-count={otherUnreadCount}>
+                                {otherUnreadCount > 99 ? "99+" : otherUnreadCount}
+                            </span>
+                        )}
                     </button>
                     <span className="page-title" style={{ position: 'relative' }}>
                         {offlineMode ? "线下 · " : ""}
@@ -5436,6 +5478,72 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                         const isExpanded = expandedVoiceCallIds.has(vcGroup.startId);
                         const groupMessages = projectedMessages.slice(vcGroup.startIdx, vcGroup.endIdx + 1);
                         const chatCount = groupMessages.filter(m => uiRole(m) !== "system").length;
+                        if (session.callRecordStyle === "wechat" && !session.isGroup) {
+                            const initiatedByUser = vcGroup.initiatorRole === "user";
+                            const appearance = {
+                                voiceIcon: session.callRecordAppearance?.voiceIcon ?? "☎︎",
+                                videoIcon: session.callRecordAppearance?.videoIcon ?? "▣",
+                                voiceLabel: session.callRecordAppearance?.voiceLabel ?? "语音通话",
+                                videoLabel: session.callRecordAppearance?.videoLabel ?? "视频通话",
+                            };
+                            const callIcon = vcGroup.callType === "video" ? appearance.videoIcon : appearance.voiceIcon;
+                            const callTypeLabel = vcGroup.callType === "video" ? appearance.videoLabel : appearance.voiceLabel;
+                            const defaults = {
+                                ended: "通话时长 {时长}",
+                                cancelled: "已取消",
+                                rejected: "已拒绝",
+                                missed: "未接听",
+                            } as const;
+                            const rawTemplate = session.callRecordTemplates?.[vcGroup.endState] || defaults[vcGroup.endState];
+                            const realDuration = vcGroup.duration || "00:00";
+                            const recordText = vcGroup.endState === "ended"
+                                ? (rawTemplate.includes("{时长}")
+                                    ? rawTemplate.replaceAll("{时长}", realDuration)
+                                    : `${rawTemplate.trim()} ${realDuration}`.trim())
+                                : rawTemplate;
+                            return (
+                                <div
+                                    key={`vc-${vcGroup.startId}`}
+                                    className={`chat-call-record-row ${initiatedByUser ? "is-user" : "is-assistant"}`}
+                                    data-call-type={vcGroup.callType}
+                                    data-call-initiator={initiatedByUser ? "user" : "assistant"}
+                                >
+                                    {!initiatedByUser && (
+                                        <div className="chat-msg-avatar chat-call-record-avatar">
+                                            {character?.avatar ? <img src={character.avatar} alt="" /> : <ChatFallbackAvatar />}
+                                        </div>
+                                    )}
+                                    <div
+                                        className={`chat-call-record-bubble chat-bubble-role-${vcGroup.initiatorRole} rounded-md`}
+                                        data-ui={initiatedByUser ? "bubble-user" : "bubble-bot"}
+                                        onPointerDown={(e) => { e.stopPropagation(); handleMessagePointerDown(e, `vc-${vcGroup.startId}`); }}
+                                        onPointerUp={handleMessagePointerUp}
+                                        onPointerCancel={handleMessagePointerCancel}
+                                        onPointerLeave={handleMessagePointerCancel}
+                                        onContextMenu={(e) => { e.preventDefault(); openMessageContextMenu(`vc-${vcGroup.startId}`, { x: e.clientX, y: e.clientY }); }}
+                                        {...(activeMessageId === `vc-${vcGroup.startId}` ? { "data-active": "" } : {})}
+                                    >
+                                        <span className="chat-call-record-heading">
+                                            {callIcon && <span className="chat-call-record-icon" aria-hidden="true">{callIcon}</span>}
+                                            <span className="chat-call-record-title">{callTypeLabel}</span>
+                                        </span>
+                                        <span className="chat-call-record-copy">{recordText}</span>
+                                        {activeMessageId === `vc-${vcGroup.startId}` && renderDeleteOnlyContextMenu(() => {
+                                            const groupMsgIds = groupMessages.map(m => m.id);
+                                            void deleteWeixinCloudBeforeLocal(groupMessages, () => {
+                                                groupMsgIds.forEach(id => deleteChatMessage(id));
+                                                setMessages(prev => prev.filter(m => !groupMsgIds.includes(m.id)));
+                                            });
+                                        })}
+                                    </div>
+                                    {initiatedByUser && (
+                                        <div className="chat-msg-avatar chat-call-record-avatar">
+                                            {userIdentity?.avatarUrl ? <img src={userIdentity.avatarUrl} alt="" /> : <User size={20} color="var(--c-text)" />}
+                                        </div>
+                                    )}
+                                </div>
+                            );
+                        }
                         return (
                             <div key={`vc-${vcGroup.startId}`} className="flex flex-col gap-2">
                                 <div
@@ -5552,13 +5660,13 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                     // Skip messages that belong to a voice call group (rendered above)
                     if (voiceCallGroups.memberSet.has(idx)) return null;
 
-                    const renderMsg = msg;
+                    const renderMsg = repairLegacyInnerMonologueForDisplay(msg);
                     const isSystemInstruction = isSystemInstructionMessage(renderMsg);
                     const bubbleDisplayContent = getMessageDisplayContent(renderMsg);
                     let prevVisibleMsg: RenderChatMessage | null = null;
                     for (let prevIdx = idx - 1; prevIdx >= 0; prevIdx -= 1) {
                         if (voiceCallGroups.memberSet.has(prevIdx)) continue;
-                        const candidate = projectedMessages[prevIdx];
+                        const candidate = repairLegacyInnerMonologueForDisplay(projectedMessages[prevIdx]);
                         const candidateDisplayContent = getMessageDisplayContent(candidate);
                         if (isHiddenChatFlowMessage(candidate, candidateDisplayContent)) continue;
                         prevVisibleMsg = candidate;
@@ -5621,6 +5729,7 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                                 id={`message-${msg.id}`}
                                 className="chat-msg-wrapper"
                                 data-role={uiRole(msg)}
+                                data-message-time={msg.createdAt}
                                 {...(isEmptyBubble && renderMsg.reasoningText ? { "data-reasoning-empty": "" } : {})}
                                 {...(isConsecutive ? { "data-consecutive": "" } : {})}
                                 {...(activeMessageId === msg.id ? { "data-active": "" } : {})}
@@ -5728,7 +5837,7 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                                                     {...(activeMessageId === msg.id ? { "data-active": "" } : {})}
                                                 >
                                                     <span className="chat-monologue-heart ts-18 leading-none inline-block" {...(expandedMonologueId === msg.id ? { "data-active": "" } : {})}><svg viewBox="0 0 16 16" width="18" height="18" style={{display:"block"}}><path d="M8 14s-6-4-6-8c0-2.5 1.5-4 3.5-4 1 0 2 .5 2.5 1.5C8.5 2.5 9.5 2 10.5 2 12.5 2 14 3.5 14 6c0 4-6 8-6 8z" fill="currentColor"/></svg></span>
-                                                    {activeMessageId === msg.id && renderDeleteOnlyContextMenu(() => handleDeleteMessage(getStoredActionMessageId(msg)), () => startMultiSelectFromMessage(msg))}
+                                                    {activeMessageId === msg.id && renderBubbleContextMenu(msg)}
                                                 </div>
                                             ) : (
                                                 <div className="chat-msg-avatar flex flex-col items-center gap-1 shrink-0">
@@ -5831,6 +5940,16 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                                                     <User size={20} color="var(--c-text)" />
                                                 )}
                                             </div>
+                                        )}
+                                        {uiRole(msg) !== "system" && !isEmptyBubble && (
+                                            <time
+                                                className="chat-message-time"
+                                                data-role={uiRole(msg)}
+                                                dateTime={msg.createdAt}
+                                                title={new Date(msg.createdAt).toLocaleString()}
+                                            >
+                                                {formatChatUiTime(msg.createdAt)}
+                                            </time>
                                         )}
                                     </>
                                 )}
