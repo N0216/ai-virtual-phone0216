@@ -22,6 +22,8 @@ export type StatusRegionVariant = "single" | "group";
 
 export type StatusRegionConfig = {
     mode: StatusRegionMode;
+    /** 独立于状态栏外观：开启后每次正式回复都必须输出一次内心独白。旧配置缺省为开启。 */
+    innerMonologueEnabled?: boolean;
     /** 输出契约：告诉 AI [状态栏] 壳内输出什么（custom 模式生效） */
     contract: string;
     /** 输出渲染：完整 HTML（可含 JS），沙盒 iframe 执行，接管折叠区绘制 */
@@ -96,6 +98,7 @@ export const NATIVE_STATUS_REGION_FULL_EXAMPLE = [
 
 export const DEFAULT_STATUS_REGION_CONFIG: StatusRegionConfig = {
     mode: "native",
+    innerMonologueEnabled: true,
     contract: "",
     renderHtml: "",
     previewRaw: "",
@@ -119,6 +122,7 @@ export function getStatusRegionConfig(sessionId: string): StatusRegionConfig {
     const mode = raw.mode === "off" || raw.mode === "custom" ? raw.mode : "native";
     return {
         mode,
+        innerMonologueEnabled: raw.innerMonologueEnabled !== false,
         contract: typeof raw.contract === "string" ? raw.contract : "",
         renderHtml: typeof raw.renderHtml === "string" ? raw.renderHtml : "",
         previewRaw: typeof raw.previewRaw === "string" ? raw.previewRaw : "",
@@ -128,7 +132,12 @@ export function getStatusRegionConfig(sessionId: string): StatusRegionConfig {
 export function saveStatusRegionConfig(sessionId: string, config: StatusRegionConfig): void {
     if (typeof window === "undefined") return;
     const all = loadAll();
-    if (config.mode === "native" && !config.contract.trim() && !config.renderHtml.trim()) {
+    if (
+        config.mode === "native"
+        && config.innerMonologueEnabled !== false
+        && !config.contract.trim()
+        && !config.renderHtml.trim()
+    ) {
         delete all[sessionId];
     } else {
         all[sessionId] = config;
@@ -148,10 +157,17 @@ export function resolveStatusRegionSection(
     config: StatusRegionConfig,
     variant: StatusRegionVariant = "single",
 ): string {
-    if (config.mode === "off") return "";
+    const monologueEnabled = config.innerMonologueEnabled !== false;
+    const mandatoryInner = [
+        "## 内心想法（强制）",
+        "【规则】只要本轮输出正式回复，就必须且只能输出一次 [内心]...[/内心]，不可省略、不可留空；短回复、主动消息、自动醒来与重试回复同样适用。",
+        "【格式】[内心]角色此刻没有说出口的真实心理活动、潜台词或情绪波动[/内心]",
+    ].join("\n");
+    if (config.mode === "off") return monologueEnabled ? mandatoryInner : "";
     if (isCustomStatusRegionActive(config)) {
         // 契约即「## 状态栏」章节的整个正文（含【逻辑】【格式】与 [状态栏] 包裹要求），不再套固定信封
-        const body = "## 状态栏\n" + config.contract.trim();
+        const body = "## 状态栏\n" + config.contract.trim()
+            + (monologueEnabled ? `\n\n${mandatoryInner}` : "\n\n【内心独白】已关闭，不要输出 [内心] 标签。");
         if (variant !== "group") return body;
         return [
             body,
@@ -162,32 +178,67 @@ export function resolveStatusRegionSection(
             "一律以本契约的 [状态栏]...[/状态栏] 取代。",
         ].join("\n");
     }
-    return variant === "group" ? NATIVE_STATUS_REGION_SECTION_GROUP : NATIVE_STATUS_REGION_SECTION;
+    if (monologueEnabled) {
+        return variant === "group"
+            ? NATIVE_STATUS_REGION_SECTION_GROUP + "\n- 每个正式发言角色都必须输出一次且仅一次非空 [内心]...[/内心]。"
+            : NATIVE_STATUS_REGION_SECTION + "\n【强制】每次正式回复必须且只能输出一次非空 [内心]...[/内心]，不可省略。";
+    }
+    if (variant === "group") {
+        return NATIVE_STATUS_REGION_SECTION_GROUP
+            .replace("### 状态值与内心", "### 状态值")
+            .replace(/与内心想法/g, "")
+            .replace(/\n\[内心\][^\n]+\[\/内心\]/g, "")
+            .replace(/\n- [^\n]*内心[^\n]*/g, "")
+            + "\n- 内心独白已关闭，不要输出 [内心] 标签。";
+    }
+    return NATIVE_STATUS_REGION_SECTION.split("\n\n## 内心想法")[0]
+        + "\n\n【内心独白】已关闭，不要输出 [内心] 标签。";
 }
 
 /** {{statusRegionExampleLine}} 的解析值（主动消息类条目的静默输出格式块） */
 export function resolveStatusRegionExampleLine(config: StatusRegionConfig): string {
-    if (config.mode === "off") return "如果决定静默，不输出任何内容。";
+    const monologueEnabled = config.innerMonologueEnabled !== false;
+    if (config.mode === "off") return monologueEnabled
+        ? "如果决定静默，不输出任何内容；如果输出正式消息，必须同时输出一次非空 [内心]...[/内心]。"
+        : "如果决定静默，不输出任何内容。";
     if (isCustomStatusRegionActive(config)) {
-        return "如果决定静默，按照以下格式输出：\n[状态栏]（按状态栏契约输出）[/状态栏]";
+        return "如果决定静默，按照以下格式输出：\n[状态栏]（按状态栏契约输出）[/状态栏]"
+            + (monologueEnabled ? "\n[内心]本次真实心理活动[/内心]" : "");
     }
-    return NATIVE_STATUS_REGION_EXAMPLE_LINE;
+    return monologueEnabled
+        ? NATIVE_STATUS_REGION_EXAMPLE_LINE
+        : [
+            "如果决定静默，按照以下格式输出：",
+            "[好感度:X][占有欲:X][焦虑值:X]",
+            "不要输出 [内心] 标签。",
+        ].join("\n");
 }
 
 /** {{statusRegionComposition}} 的解析值（文字聊天模式的【输出构成】行） */
 export function resolveStatusRegionComposition(config: StatusRegionConfig): string {
-    if (config.mode === "off") return "【输出构成】输出格式由两个部分组成：聊天消息、富媒体动作（可选）。";
+    const monologueEnabled = config.innerMonologueEnabled !== false;
+    if (config.mode === "off") return monologueEnabled
+        ? "【输出构成】输出格式由三个部分组成：内心想法（强制）、聊天消息、富媒体动作（可选）。"
+        : "【输出构成】输出格式由两个部分组成：聊天消息、富媒体动作（可选）。";
     if (isCustomStatusRegionActive(config)) {
-        return "【输出构成】输出格式由三个部分组成：状态栏、聊天消息、富媒体动作（可选）。";
+        return monologueEnabled
+            ? "【输出构成】输出格式由四个部分组成：状态栏、内心想法（强制）、聊天消息、富媒体动作（可选）。"
+            : "【输出构成】输出格式由三个部分组成：状态栏、聊天消息、富媒体动作（可选）。";
     }
-    return NATIVE_STATUS_REGION_COMPOSITION;
+    return monologueEnabled
+        ? NATIVE_STATUS_REGION_COMPOSITION
+        : "【输出构成】输出格式由三个部分组成：状态数值、聊天消息、富媒体动作（可选）；不要输出 [内心] 标签。";
 }
 
 /** {{statusRegionFullExample}} 的解析值（「## 完整示例」里的状态值+内心行） */
 export function resolveStatusRegionFullExample(config: StatusRegionConfig): string {
-    if (config.mode === "off") return "";
-    if (isCustomStatusRegionActive(config)) return "[状态栏]（按状态栏契约输出）[/状态栏]";
-    return NATIVE_STATUS_REGION_FULL_EXAMPLE;
+    const monologueEnabled = config.innerMonologueEnabled !== false;
+    if (config.mode === "off") return monologueEnabled ? "[内心]本次回复前真实但没有说出口的想法。[/内心]" : "";
+    if (isCustomStatusRegionActive(config)) return "[状态栏]（按状态栏契约输出）[/状态栏]"
+        + (monologueEnabled ? "\n[内心]本次回复前真实但没有说出口的想法。[/内心]" : "");
+    return monologueEnabled
+        ? NATIVE_STATUS_REGION_FULL_EXAMPLE
+        : "[好感度:72][占有欲:25][焦虑值:15]";
 }
 
 /** 预设是否声明了状态区宏（聊天信息页自定义入口的可用性判定） */

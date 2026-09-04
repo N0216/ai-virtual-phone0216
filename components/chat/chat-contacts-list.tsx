@@ -27,11 +27,13 @@ import {
     subscribeMascotSettings,
     updateMascotSettings,
 } from "@/lib/mascot-settings";
+import { loadDeepSeekExecutionAssistantConfig } from "@/lib/deepseek-execution-assistant";
 
 type ChatContactsListProps = {
     onCloseApp: () => void;
     onSelectSession: (session: ChatSession | null) => void;
     onSelectMascot: () => void;
+    onSelectDeepSeek: () => void;
     /** 名片点击「加好友」：切到本 tab 后待打开添加页的角色 id */
     pendingAddContactId?: string | null;
     onPendingAddContactConsumed?: () => void;
@@ -39,7 +41,7 @@ type ChatContactsListProps = {
     onPendingAddContactBack?: () => void;
 };
 
-export function ChatContactsList({ onCloseApp, onSelectSession, onSelectMascot, pendingAddContactId, onPendingAddContactConsumed, onPendingAddContactBack }: ChatContactsListProps) {
+export function ChatContactsList({ onCloseApp, onSelectSession, onSelectMascot, onSelectDeepSeek, pendingAddContactId, onPendingAddContactConsumed, onPendingAddContactBack }: ChatContactsListProps) {
     const [contacts, setContacts] = useState<(ChatContact & { char?: Character })[]>([]);
     const [contactFilter, setContactFilter] = useState("");
     const [latestPost, setLatestPost] = useState<Record<string, string>>({});
@@ -254,6 +256,17 @@ export function ChatContactsList({ onCloseApp, onSelectSession, onSelectMascot, 
                             <div className="flex-1 overflow-hidden h-[48px] flex flex-col justify-center gap-1">
                                 <div className="ts-16 font-medium text-[var(--c-text-title)] truncate">{mascotSettings.nickname || "AI助手"}</div>
                                 <div className="ts-13 text-[var(--c-text)] opacity-80 truncate font-normal">内置创作助手</div>
+                            </div>
+                        </div>
+                    </div>
+                )}
+                {loadDeepSeekExecutionAssistantConfig().chatEnabled !== false && (
+                    <div className="mb-3">
+                        <div className="minimal-list-item" onClick={onSelectDeepSeek}>
+                            <div className="minimal-avatar-wrapper" style={{ background: "#2f6bff", color: "white", display: "grid", placeItems: "center", fontWeight: 700 }}>DS<span className="minimal-online-dot" /></div>
+                            <div className="flex-1 overflow-hidden h-[48px] flex flex-col justify-center gap-1">
+                                <div className="ts-16 font-medium text-[var(--c-text-title)] truncate">DeepSeek助手</div>
+                                <div className="ts-13 text-[var(--c-text)] opacity-80 truncate font-normal">低权限执行助理</div>
                             </div>
                         </div>
                     </div>

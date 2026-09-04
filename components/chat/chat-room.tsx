@@ -89,6 +89,7 @@ import { CHAT_PLUGIN_TOAST_EVENT, getChatPluginRuntime } from "@/lib/chat-plugin
 import { ChatPluginSlot } from "@/components/chat/chat-plugin-slot";
 import { storeMediaBlob } from "@/lib/media-cache-storage";
 import { MAX_CHAT_FILE_BYTES, prepareChatFile } from "@/lib/chat-file-attachment";
+import { resolveCloudSttConfig, startCallRecording, transcribeAudioBlob, type ActiveCallRecording } from "@/lib/stt-cloud";
 
 // ── Call system message detection ──────────────────────────
 // Call messages are stored with user/assistant role for correct prompt alternation,
@@ -638,6 +639,7 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
     onStartVoiceCall: () => void;
     onSendText: (text: string) => boolean;
     onSendFile: (file: File) => Promise<void>;
+    onSendVoice: (label: string, audioDataUrl: string) => void;
     onStopGeneration: () => void;
     onTriggerAIResponse: () => void;
 	onSendSticker: (name: string, url?: string) => void;
@@ -670,11 +672,17 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
     onStartVoiceCall,
     onSendText,
     onSendFile,
+    onSendVoice,
     onStopGeneration,
     onTriggerAIResponse,
     onSendSticker,
 }, ref) {
     const [inputText, setInputText] = useState("");
+    const [voiceMode, setVoiceMode] = useState(false);
+    const [voiceState, setVoiceState] = useState<"idle" | "recording" | "processing" | "cancel">("idle");
+    const voiceRecorderRef = useRef<ActiveCallRecording | null>(null);
+    const voiceStartYRef = useRef(0);
+    const voicePressedRef = useRef(false);
     const textareaRef = useRef<HTMLTextAreaElement | null>(null);
     const fileInputRef = useRef<HTMLInputElement | null>(null);
     // 表情包搜索联想：ESC/失焦置 true 隐藏，输入变化重新开启
@@ -725,6 +733,62 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
         resetTextareaHeight();
         onClosePanels();
     };
+
+    const blobToDataUrl = useCallback((blob: Blob) => new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(blob);
+    }), []);
+
+    const beginVoiceHold = useCallback(async (event: React.PointerEvent<HTMLButtonElement>) => {
+        if (inputLocked || voiceState !== "idle") return;
+        event.currentTarget.setPointerCapture?.(event.pointerId);
+        voicePressedRef.current = true;
+        voiceStartYRef.current = event.clientY;
+        setVoiceState("recording");
+        try {
+            const recorder = await startCallRecording();
+            if (!voicePressedRef.current) { recorder.cancel(); setVoiceState("idle"); return; }
+            voiceRecorderRef.current = recorder;
+        } catch (error) {
+            voicePressedRef.current = false;
+            setVoiceState("idle");
+            alert(error instanceof Error ? error.message : "无法使用麦克风");
+        }
+    }, [inputLocked, voiceState]);
+
+    const finishVoiceHold = useCallback(async (cancel: boolean) => {
+        if (!voicePressedRef.current && !voiceRecorderRef.current) return;
+        voicePressedRef.current = false;
+        const recorder = voiceRecorderRef.current;
+        voiceRecorderRef.current = null;
+        if (!recorder) { setVoiceState("idle"); return; }
+        if (cancel || voiceState === "cancel") {
+            recorder.cancel();
+            setVoiceState("idle");
+            return;
+        }
+        setVoiceState("processing");
+        try {
+            const blob = await recorder.stop();
+            if (!blob) return;
+            const [audioDataUrl, label] = await Promise.all([
+                blobToDataUrl(blob),
+                (async () => {
+                    const config = resolveCloudSttConfig(characterId);
+                    if (!config) return "语音消息";
+                    try { return (await transcribeAudioBlob(blob, config)).trim() || "语音消息"; }
+                    catch { return "语音消息"; }
+                })(),
+            ]);
+            onSendVoice(label, audioDataUrl);
+        } finally {
+            setVoiceState("idle");
+        }
+    }, [blobToDataUrl, characterId, onSendVoice, voiceState]);
+
+    useEffect(() => () => voiceRecorderRef.current?.cancel(), []);
 
     const panelOpen = showEmojiPanel || showStickerPanel || showPlusMenu;
     const suggestCharacterIds = useMemo(
@@ -810,7 +874,7 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
             <div className="chat-composer-row">
                 <button
                     type="button"
-                    onClick={() => onOpenRichModal("voice_msg")}
+                    onClick={() => { setVoiceMode(value => !value); onClosePanels(); }}
                     disabled={inputLocked}
                     className="ui-bare-btn chat-composer-action text-[var(--c-text)]"
                     aria-label="语音输入"
@@ -822,7 +886,21 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
                         <path d="M8.5 13.5v-3M11 15.5v-7M13.5 14v-4M16 12.8v-1.6" />
                     </svg>
                 </button>
-                <textarea
+                {voiceMode ? (
+                <button
+                    type="button"
+                    className="chat-hold-to-talk"
+                    disabled={inputLocked || voiceState === "processing"}
+                    onPointerDown={beginVoiceHold}
+                    onPointerMove={event => {
+                        if (!voicePressedRef.current) return;
+                        setVoiceState(event.clientY < voiceStartYRef.current - 60 ? "cancel" : "recording");
+                    }}
+                    onPointerUp={() => void finishVoiceHold(false)}
+                    onPointerCancel={() => void finishVoiceHold(true)}
+                    onContextMenu={event => event.preventDefault()}
+                >{voiceState === "processing" ? "识别中…" : voiceState === "cancel" ? "松开取消" : voiceState === "recording" ? "松开发送，上滑取消" : "按住说话"}</button>
+                ) : <textarea
                 ref={textareaRef}
                 rows={1}
                 value={inputText}
@@ -858,7 +936,7 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
                 placeholder={inputLocked
                     ? (isSpectator ? "围观中，你不在这个群里" : `禁言中，剩余${Math.ceil(muteRemainingMs / 60000)}分钟`)
                     : (theaterMode ? "写下番外指令..." : undefined)}
-                />
+                />}
                 <button onClick={onToggleEmojiPanel} disabled={inputLocked} className="ui-bare-btn chat-composer-action text-[var(--c-text)]" aria-label="表情" title="表情" style={inputLocked ? { opacity: 0.35 } : undefined}>
                     <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><path d="M8 14s1.5 2 4 2 4-2 4-2" /><line x1="9" y1="9" x2="9.01" y2="9" /><line x1="15" y1="9" x2="15.01" y2="9" /></svg>
                 </button>
@@ -866,7 +944,7 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
                     onClick={handleSubmit}
                     disabled={!isGenerating && (inputLocked || !inputText.trim())}
                     style={inputLocked && !isGenerating ? { opacity: 0.35 } : undefined}
-                    className="ui-bare-btn chat-composer-action chat-composer-send text-[var(--c-text)]"
+                    className={isGenerating ? "ui-bare-btn chat-composer-action chat-composer-send text-[var(--c-text)]" : "chat-composer-send-button"}
                     aria-label={isGenerating ? "停止本轮生成" : "发送"}
                     title={isGenerating ? "停止本轮生成" : "发送"}
                 >
@@ -875,9 +953,7 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
                             <circle cx="12" cy="12" r="10" />
                             <rect x="9" y="9" width="6" height="6" rx="1" />
                         </svg>
-                    ) : (
-                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
-                    )}
+                    ) : "发送"}
                 </button> : <button onClick={onTogglePlusMenu} disabled={inputLocked} className="ui-bare-btn chat-composer-action text-[var(--c-text)]" aria-label="更多功能" title="更多功能" style={inputLocked ? { opacity: 0.35 } : undefined}>
                     <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="16" /><line x1="8" y1="12" x2="16" y2="12" /></svg>
                 </button>}
@@ -902,6 +978,9 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
             {showEmojiPanel && (
                 <EmojiPanel
                     onSelect={(emoji) => appendText(emoji, { focus: false })}
+                    onStickerSend={onSendSticker}
+                    characterId={characterId}
+                    characterIds={stickerCharacterIds}
                     onEffectSend={(text) => {
                         if (inputLocked || isGenerating) return;
                         onSendText(text);
@@ -1491,6 +1570,11 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
             window.removeEventListener("followup-fired", onFired);
         };
     }, [session.id, syncMessagesFromStorage]);
+
+    // 切换/重新进入会话时同步最新持久化 CSS；事件只负责当前页面内的即时刷新。
+    useEffect(() => {
+        setLiveCSS(session.customCSS || "");
+    }, [session.id, session.customCSS]);
 
     // Listen for live CSS updates from 小卷
     useEffect(() => {
@@ -5259,7 +5343,7 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                             : (session.alias || character?.name || `User_${session.contactId.slice(-4)}`)}
                         {(isGenerating || isOfflineGenerating) && (
                             <span className="chat-typing-indicator">
-                                {offlineMode ? "线下生成中" : "对方正在输入"}<span className="chat-typing-dots"><i/><i/><i/></span>
+                                {offlineMode ? "线下生成中…" : "对方正在输入…"}
                             </span>
                         )}
                     </span>
@@ -5317,7 +5401,7 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                             const showTime = !prevTime || shouldShowTimestamp(turn.createdAt, prevTime);
                             return (
                             <Fragment key={turn.id}>
-                            {showTime && <div className="chat-offline-time">{formatChatUiTime(turn.createdAt)}</div>}
+                            {showTime && <div className="chat-offline-time chat-time-divider">{formatChatUiTime(turn.createdAt, session.chatTimeFormat || "smart")}</div>}
                             <div className="chat-offline-turn">
                                 <div className="chat-offline-entry" data-role="user" style={offlineDisplay.userContent.trim() ? undefined : { display: "none" }}>
                                     {/* 头像占位：默认 display:none（见 chat.css），供自定义 CSS 显示 */}
@@ -5698,8 +5782,8 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                         <div key={msg.id} className="flex flex-col gap-4" {...(hiddenEmpty ? { style: { display: "none" } } : {})} {...(isEmptyBubble && renderMsg.reasoningText && !showTime ? { "data-reasoning-only": "" } : {})}>
                             {showTime && (
                                 <div className="flex justify-center w-full">
-                                    <span className="chat-sys-msg py-[2px] px-2 rounded select-none">
-                                        {formatChatUiTime(msg.createdAt)}
+                                    <span className="chat-sys-msg chat-time-divider py-[2px] px-2 rounded select-none" data-role="divider">
+                                        {formatChatUiTime(msg.createdAt, session.chatTimeFormat || "smart")}
                                     </span>
                                 </div>
                             )}
@@ -5942,7 +6026,7 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                                                 dateTime={msg.createdAt}
                                                 title={new Date(msg.createdAt).toLocaleString()}
                                             >
-                                                {formatChatUiTime(msg.createdAt)}
+                                                {formatChatUiTime(msg.createdAt, session.chatTimeFormat || "smart")}
                                             </time>
                                         )}
                                     </>
@@ -6087,6 +6171,7 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                 onStartVoiceCall={() => { cancelFollowUp(session.id); setShowPlusMenu(false); setCallInitiator("user"); setShowVoiceCall(true); }}
                 onSendText={handleSendText}
                 onSendFile={handleSendFile}
+                onSendVoice={(label, audioDataUrl) => sendRichMessage("audio", { label }, "", audioDataUrl)}
                 onStopGeneration={clearStuckGeneration}
                 onTriggerAIResponse={triggerAIResponse}
                 onSendSticker={(name, url) => { setShowStickerPanel(false); sendRichMessage("sticker", { label: name, stickerUrl: url }); }}

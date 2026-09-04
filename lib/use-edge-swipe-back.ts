@@ -26,6 +26,7 @@ type ActiveGesture = {
     lastTime: number;
     owner: Registration;
     surface: HTMLElement | null;
+    width: number;
     axis: "pending" | "x" | "y";
 };
 
@@ -111,7 +112,33 @@ function shouldIgnoreGesture(element: Element | null): boolean {
 function installListeners(): void {
     if (listenersInstalled || typeof document === "undefined") return;
     listenersInstalled = true;
+    const stopTrackingMove = () => {
+        document.removeEventListener("touchmove", handleTouchMove, true);
+    };
+    const handleTouchMove = (event: TouchEvent) => {
+        if (!gesture || event.touches.length !== 1) return;
+        const touch = event.touches[0];
+        const dx = touch.clientX - gesture.x;
+        const dy = touch.clientY - gesture.y;
+
+        if (gesture.axis === "pending" && Math.hypot(dx, dy) >= 8) {
+            gesture.axis = dx > 0 && Math.abs(dx) > Math.abs(dy) * 1.12 ? "x" : "y";
+            if (gesture.axis === "y") stopTrackingMove();
+        }
+        if (gesture.axis !== "x") return;
+
+        event.preventDefault();
+        const width = gesture.width;
+        const clamped = Math.min(Math.max(0, dx), width);
+        const offset = clamped <= width * 0.35
+            ? clamped * 0.72
+            : width * 0.252 + (clamped - width * 0.35) * 0.18;
+        setSurfaceOffset(gesture.surface, offset);
+        gesture.lastX = touch.clientX;
+        gesture.lastTime = performance.now();
+    };
     document.addEventListener("touchstart", event => {
+        stopTrackingMove();
         gesture = null;
         if (event.touches.length !== 1) return;
         const touch = event.touches[0];
@@ -129,44 +156,28 @@ function installListeners(): void {
         const owner = candidates[0];
         if (owner) {
             clearSettleTimer();
+            const surface = resolveSurface(owner, element);
             gesture = {
                 x: touch.clientX,
                 y: touch.clientY,
                 lastX: touch.clientX,
                 lastTime: performance.now(),
                 owner,
-                surface: resolveSurface(owner, element),
+                surface,
+                width: surface?.clientWidth || window.innerWidth,
                 axis: "pending",
             };
+            // A non-passive document-wide touchmove listener makes every scroll
+            // wait for JavaScript. Only install it while a real left-edge gesture
+            // is active so ordinary app scrolling stays compositor-driven.
+            document.addEventListener("touchmove", handleTouchMove, { passive: false, capture: true });
         }
     }, { passive: true, capture: true });
-    document.addEventListener("touchmove", event => {
-        if (!gesture || event.touches.length !== 1) return;
-        const touch = event.touches[0];
-        const dx = touch.clientX - gesture.x;
-        const dy = touch.clientY - gesture.y;
-
-        if (gesture.axis === "pending" && Math.hypot(dx, dy) >= 8) {
-            gesture.axis = dx > 0 && Math.abs(dx) > Math.abs(dy) * 1.12 ? "x" : "y";
-        }
-        if (gesture.axis !== "x") return;
-
-        event.preventDefault();
-        const width = gesture.surface?.getBoundingClientRect().width || window.innerWidth;
-        const clamped = Math.min(Math.max(0, dx), width);
-        // A small resistance near the far edge keeps the transition responsive
-        // without letting a page fly away under the finger.
-        const offset = clamped <= width * 0.35
-            ? clamped * 0.72
-            : width * 0.252 + (clamped - width * 0.35) * 0.18;
-        setSurfaceOffset(gesture.surface, offset);
-        gesture.lastX = touch.clientX;
-        gesture.lastTime = performance.now();
-    }, { passive: false, capture: true });
     document.addEventListener("touchend", event => {
         if (!gesture || event.changedTouches.length === 0) return;
         const current = gesture;
         gesture = null;
+        stopTrackingMove();
         const touch = event.changedTouches[0];
         const dx = touch.clientX - current.x;
         const dy = Math.abs(touch.clientY - current.y);
@@ -181,6 +192,7 @@ function installListeners(): void {
     document.addEventListener("touchcancel", () => {
         const current = gesture;
         gesture = null;
+        stopTrackingMove();
         finishSurface(current?.surface ?? null, false);
     }, { passive: true, capture: true });
 }

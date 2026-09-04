@@ -41,6 +41,14 @@ export type MascotMsg = {
     displayText?: string;
     /** 用户附带的图片，base64 data URL 数组（仅原生协议会真正发给 LLM，文本协议会忽略） */
     images?: string[];
+    /** 普通附件/语音，保存在独立助手会话中并可重新打开或下载。 */
+    attachments?: Array<{
+        kind: "file" | "audio";
+        name: string;
+        mimeType: string;
+        size: number;
+        dataUrl: string;
+    }>;
     // 当 role=mascot 且使用原生协议时，存 LLM 返回的 toolCalls（用于下一轮请求重建上下文）
     toolCalls?: LlmToolCall[];
     // 当 role=mascot 时，存 LLM 返回的 reasoning 文本（Gemini 多轮工具调用需要把这段 thought 也回传，否则上下文会被丢）

@@ -480,17 +480,21 @@ export function stopMascotGeneration() {
 export async function appendMascotMessage({
     text,
     images = [],
+    attachments = [],
 }: {
     text: string;
     images?: string[];
+    attachments?: MascotMsg["attachments"];
 }): Promise<boolean> {
     await hydrateMascotChat();
     const trimmed = text.trim();
-    if ((!trimmed && images.length === 0) || isThinking) return false;
+    if ((!trimmed && images.length === 0 && attachments.length === 0) || isThinking) return false;
 
-    const userMsg: MascotMsg = images.length > 0
-        ? { role: "user", text: trimmed, images, createdAt: new Date().toISOString() }
-        : { role: "user", text: trimmed, createdAt: new Date().toISOString() };
+    const userMsg: MascotMsg = {
+        role: "user", text: trimmed, createdAt: new Date().toISOString(),
+        ...(images.length > 0 ? { images } : {}),
+        ...(attachments.length > 0 ? { attachments } : {}),
+    };
     const shouldAutoTitle = !messages.some((msg) => msg.role === "user");
     const workingMessages = normalizeMessages([...messages, userMsg]);
     if (shouldAutoTitle && activeSessionId) {
@@ -721,13 +725,15 @@ export async function generateMascotReply({
 export async function sendMascotMessage({
     text,
     images = [],
+    attachments = [],
     context = getMascotContext(),
 }: {
     text: string;
     images?: string[];
+    attachments?: MascotMsg["attachments"];
     context?: MascotPageContext;
 }): Promise<void> {
-    const accepted = await appendMascotMessage({ text, images });
+    const accepted = await appendMascotMessage({ text, images, attachments });
     if (accepted) await generateMascotReply({ context });
 }
 

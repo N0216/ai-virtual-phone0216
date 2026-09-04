@@ -147,6 +147,16 @@ function scopeSingleSelector(sel: string, scope: string): string {
   if (sel === scope) {
     return scope;
   }
+  // 会话 CSS 常按全局示例写成这些根容器。它们与会话 scope 是同一个元素
+  // 或其祖先，不能拼成 `.session-x .chat-room-wrapper`（该选择器永远匹配不到）。
+  const chatRoots = [".chat-app", ".chat-room-wrapper", ".chat-room", ".chat-session", ".page-shell"];
+  for (const root of chatRoots) {
+    if (sel === root) return scope;
+    if (sel.startsWith(root + " ")) return scope + " " + sel.slice(root.length).trimStart();
+    if (sel.startsWith(root + ":") || sel.startsWith(root + "[") || sel.startsWith(root + ".")) {
+      return scope + sel.slice(root.length);
+    }
+  }
   // 选择器以 scope 开头并跟着空格/伪类/属性（如 .chat-app .foo / .chat-app:hover / .chat-app[data-x]）：
   // 已经包含 scope 了，不要重复前缀，否则也会失效
   if (sel.startsWith(scope + " ") || sel.startsWith(scope + ":") || sel.startsWith(scope + "[") || sel.startsWith(scope + ".") || sel.startsWith(scope + ">")) {

@@ -12,7 +12,13 @@ export const DEEPSEEK_EXECUTOR_ID = "deepseek-execution-assistant";
 export const DEEPSEEK_EXECUTOR_CONFIG_KEY = "ai_phone_deepseek_execution_assistant_v1";
 registerKvMigration(DEEPSEEK_EXECUTOR_CONFIG_KEY);
 
-export type DeepSeekExecutionAssistantConfig = { enabled: boolean; apiConfigId: string; executorId: string };
+export type DeepSeekExecutionAssistantConfig = {
+  enabled: boolean;
+  apiConfigId: string;
+  executorId: string;
+  chatEnabled?: boolean;
+  personaPrompt?: string;
+};
 
 export function isForbiddenDeepSeekToolName(name: string): boolean {
   return isAlwaysForbiddenExecutionAssistantToolName(name);
@@ -36,9 +42,15 @@ function structuredExecutionResult(text: string): Record<string, unknown> {
 export function loadDeepSeekExecutionAssistantConfig(): DeepSeekExecutionAssistantConfig {
   try {
     const parsed = JSON.parse(kvGet(DEEPSEEK_EXECUTOR_CONFIG_KEY) || "{}") as Partial<DeepSeekExecutionAssistantConfig>;
-    return { enabled: parsed.enabled === true, apiConfigId: String(parsed.apiConfigId || ""), executorId: String(parsed.executorId || DEEPSEEK_EXECUTOR_ID) };
+    return {
+      enabled: parsed.enabled === true,
+      apiConfigId: String(parsed.apiConfigId || ""),
+      executorId: String(parsed.executorId || DEEPSEEK_EXECUTOR_ID),
+      chatEnabled: parsed.chatEnabled !== false,
+      personaPrompt: String(parsed.personaPrompt || "沉稳、利落、诚实，先确认目标再行动；像现实中的执行助理一样汇报进度、结果和风险。"),
+    };
   } catch {
-    return { enabled: false, apiConfigId: "", executorId: DEEPSEEK_EXECUTOR_ID };
+    return { enabled: false, apiConfigId: "", executorId: DEEPSEEK_EXECUTOR_ID, chatEnabled: true, personaPrompt: "沉稳、利落、诚实，先确认目标再行动；像现实中的执行助理一样汇报进度、结果和风险。" };
   }
 }
 

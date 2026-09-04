@@ -979,10 +979,24 @@ export function ChatSettingsPanel({
                 {(
                     <div className="menu-group">
                         <div className="menu-item">
+                            <ChatInfoIcon icon={Sparkles} color={BINDING_ACCENTS.preset} />
+                            <div className="menu-label-group">
+                                <span className="menu-label">内心独白</span>
+                                <span className="menu-desc">开启后该角色每次正式回复都必须写；原始与自定义外观都生效</span>
+                            </div>
+                            <div className="menu-right">
+                                <Toggle
+                                    checked={statusRegion.innerMonologueEnabled !== false}
+                                    disabled={!statusPresetSupported}
+                                    onChange={c => saveStatusRegion({ ...statusRegion, innerMonologueEnabled: c })}
+                                />
+                            </div>
+                        </div>
+                        <div className="menu-item">
                             <ChatInfoIcon icon={Code} color={BINDING_ACCENTS.preset} />
                             <div className="menu-label-group">
                                 <span className="menu-label">原生状态栏</span>
-                                <span className="menu-desc">{statusPresetSupported ? "状态值与内心的默认输出（关闭后整块从提示词移除）" : "当前预设未声明状态区宏，仅默认预设支持"}</span>
+                                <span className="menu-desc">{statusPresetSupported ? "状态数值的默认外观；内心独白由上方独立控制" : "当前预设未声明状态区宏，仅默认预设支持"}</span>
                             </div>
                             <div className="menu-right">
                                 <Toggle
@@ -1529,6 +1543,25 @@ export function ChatSettingsPanel({
                             <ChevronRight size={16} />
                         </div>
                     </button>
+                    <div className="menu-item">
+                        <ChatInfoIcon icon={Code} color={BINDING_ACCENTS.embedding} />
+                        <div className="menu-label-group">
+                            <span className="menu-label">聊天时间格式</span>
+                            <span className="menu-desc">位置、字号和颜色可继续用本会话 CSS 调整</span>
+                        </div>
+                        <div className="menu-right">
+                            <select
+                                className="ui-select"
+                                value={session.chatTimeFormat || "smart"}
+                                onChange={e => updateSession({ chatTimeFormat: e.target.value as "smart" | "clock" | "period" | "full" })}
+                            >
+                                <option value="smart">智能日期</option>
+                                <option value="clock">01:25</option>
+                                <option value="period">凌晨1:25</option>
+                                <option value="full">完整日期时间</option>
+                            </select>
+                        </div>
+                    </div>
                 </div>
 
                 {/* Destructive Actions */}
@@ -1819,7 +1852,7 @@ export function ChatSettingsPanel({
                     <PageShell title="自定义 CSS" onBack={() => setEditingCSS(false)}>
                         <div className="theme-section-page">
                             <p className="ts-13 text-[var(--c-text)] mb-3 leading-relaxed">
-                                支持 :root 变量和选择器，仅作用于本会话。
+                                支持 :root 变量和选择器，仅作用于本会话。可分别设置或移动 .chat-message-time[data-role="user"]、.chat-message-time[data-role="assistant"] 和 .chat-time-divider。
                             </p>
                             <textarea
                                 className="ui-textarea font-mono ts-13 leading-relaxed flex-1"

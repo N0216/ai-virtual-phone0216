@@ -6,6 +6,7 @@ import { ChatContactsList } from "./chat-contacts-list";
 import { MomentsFeed } from "./moments-feed";
 import { ChatRoom } from "./chat-room";
 import { MascotChatRoom } from "./mascot-chat-room";
+import { DeepSeekAssistantChatRoom } from "./deepseek-assistant-chat-room";
 import { UserProfilePanel } from "./user-profile-panel";
 import { MessageCircle, Users, Aperture, UserRound } from "lucide-react";
 import { ChatSession, loadChatSessions, pushChatMessage, hydrateChatStorage, markChatSessionRead, setActiveChatSessionId, getTotalChatUnreadCount } from "@/lib/chat-storage";
@@ -32,6 +33,7 @@ export const PhoneChatApp = memo(function PhoneChatApp({ onClose, initialSession
     const [activeTab, setActiveTab] = useState<TabKey>("messages");
     const [activeSession, setActiveSession] = useState<ChatSession | null>(null);
     const [activeMascot, setActiveMascot] = useState(false);
+    const [activeDeepSeek, setActiveDeepSeek] = useState(false);
     // Chat app-level custom CSS (affects all chat pages, lower priority than per-session CSS)
     const [chatAppCSS, setChatAppCSS] = useState(() =>
         typeof window !== "undefined" ? kvGet("chat-app-custom-css") || "" : ""
@@ -45,6 +47,7 @@ export const PhoneChatApp = memo(function PhoneChatApp({ onClose, initialSession
     const navigateBack = () => {
         if (activeSession) return setActiveSession(null);
         if (activeMascot) return setActiveMascot(false);
+        if (activeDeepSeek) return setActiveDeepSeek(false);
         if (activeTab !== "messages") return setActiveTab("messages");
         onClose();
     };
@@ -102,6 +105,7 @@ export const PhoneChatApp = memo(function PhoneChatApp({ onClose, initialSession
         if (sharePayload) {
             setActiveSession(null);
             setActiveMascot(false);
+            setActiveDeepSeek(false);
             setActiveTab("contacts");
         }
     }, [sharePayload]);
@@ -113,6 +117,7 @@ export const PhoneChatApp = memo(function PhoneChatApp({ onClose, initialSession
             const session = loadChatSessions().find(s => s.id === sessionId);
             if (!session) return;
             setActiveMascot(false);
+            setActiveDeepSeek(false);
             setActiveSession(session);
             setActiveTab("messages");
         };
@@ -133,6 +138,7 @@ export const PhoneChatApp = memo(function PhoneChatApp({ onClose, initialSession
             addContactReturnSessionRef.current = activeSessionIdRef.current;
             setActiveSession(null);
             setActiveMascot(false);
+            setActiveDeepSeek(false);
             setActiveTab("contacts");
             setPendingAddContactId(characterId);
         };
@@ -223,7 +229,14 @@ export const PhoneChatApp = memo(function PhoneChatApp({ onClose, initialSession
 
     const handleSelectMascot = () => {
         setActiveSession(null);
+        setActiveDeepSeek(false);
         setActiveMascot(true);
+        setActiveTab("messages");
+    };
+    const handleSelectDeepSeek = () => {
+        setActiveSession(null);
+        setActiveMascot(false);
+        setActiveDeepSeek(true);
         setActiveTab("messages");
     };
 
@@ -247,19 +260,20 @@ export const PhoneChatApp = memo(function PhoneChatApp({ onClose, initialSession
     return (
         <div
             className="chat-app absolute inset-0 flex flex-col overflow-hidden z-10"
-            {...(activeSession || activeMascot ? { "data-room-active": "" } : {})}
+            {...(activeSession || activeMascot || activeDeepSeek ? { "data-room-active": "" } : {})}
             {...(hideTabBar ? { "data-tabbar-hidden": "" } : {})}
         >
             {/* Chat app-level custom CSS (lower priority than per-session CSS) */}
             {chatAppCSS && <SessionCustomCSS css={chatAppCSS} scope=".chat-app" />}
             {/* The Main Content Area */}
-            <div className="chat-main-content relative flex-1 flex flex-col overflow-hidden" {...(activeSession || activeMascot ? { "data-covered-by-room": "" } : {})}>
-                {activeTab === "messages" && <ChatMessageList onCloseApp={onClose} activeSession={activeSession} onSelectSession={(session) => { setActiveMascot(false); setActiveSession(session); }} onSelectMascot={handleSelectMascot} />}
+            <div className="chat-main-content relative flex-1 flex flex-col overflow-hidden" {...(activeSession || activeMascot || activeDeepSeek ? { "data-covered-by-room": "" } : {})}>
+                {activeTab === "messages" && <ChatMessageList onCloseApp={onClose} activeSession={activeSession} onSelectSession={(session) => { setActiveMascot(false); setActiveDeepSeek(false); setActiveSession(session); }} onSelectMascot={handleSelectMascot} onSelectDeepSeek={handleSelectDeepSeek} />}
                 {activeTab === "contacts" && (
                     <ChatContactsList
                         onCloseApp={onClose}
                         onSelectSession={handleSelectContact}
                         onSelectMascot={handleSelectMascot}
+                        onSelectDeepSeek={handleSelectDeepSeek}
                         pendingAddContactId={pendingAddContactId}
                         onPendingAddContactConsumed={() => setPendingAddContactId(null)}
                         onPendingAddContactBack={() => {
@@ -278,7 +292,7 @@ export const PhoneChatApp = memo(function PhoneChatApp({ onClose, initialSession
             </div>
 
             {/* Bottom Navigation Bar — hide when inside a chat room */}
-            <nav className="chat-tab-bar chat-bottom-glass-bar" data-ui="nav" style={{ display: activeSession || activeMascot || hideTabBar ? "none" : undefined }}>
+            <nav className="chat-tab-bar chat-bottom-glass-bar" data-ui="nav" style={{ display: activeSession || activeMascot || activeDeepSeek || hideTabBar ? "none" : undefined }}>
                 <button
                     className={`chat-tab ${activeTab === "messages" ? "chat-tab-active" : ""}`}
                     onClick={() => setActiveTab("messages")}
@@ -330,6 +344,7 @@ export const PhoneChatApp = memo(function PhoneChatApp({ onClose, initialSession
                     />
                 </div>
             )}
+            {activeDeepSeek && <div className="chat-room-layer absolute inset-0"><DeepSeekAssistantChatRoom onBack={() => setActiveDeepSeek(false)} /></div>}
         </div>
     );
 });

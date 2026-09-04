@@ -69,6 +69,14 @@ export function DeepSeekExecutionSettings() {
           <option value="">{apis.length ? "选择 DeepSeek API" : "请先添加 DeepSeek API"}</option>
           {apis.map(api => <option key={api.id} value={api.id}>{api.name || "DeepSeek"}</option>)}
         </Select>
+        <div className="flex items-center justify-between gap-3">
+          <div><div className="menu-label">显示在聊天列表</div><div className="menu-desc !mt-1">固定身份为 DeepSeek助手，可像执行助理一样直接聊天</div></div>
+          <Toggle checked={config.chatEnabled !== false} onChange={chatEnabled => saveConfig({ chatEnabled })} />
+        </div>
+        <label className="flex flex-col gap-1">
+          <span className="menu-label">性格与工作风格</span>
+          <textarea className="ui-textarea min-h-24" value={config.personaPrompt || ""} onChange={event => saveConfig({ personaPrompt: event.target.value })} placeholder="例如：沉稳、简洁、主动汇报风险……" />
+        </label>
         <details className="rounded-xl border border-black/10 px-3 py-2">
           <summary className="cursor-pointer text-xs font-semibold">执行助理工具授权（{tools.filter(tool => policy?.permissions[tool.key]?.chatEnabled).length}/{tools.length}）</summary>
           <div className="mt-3 flex max-h-72 flex-col gap-2 overflow-auto">

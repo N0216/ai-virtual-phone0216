@@ -45,4 +45,31 @@ test("edge back is global, finger tracking and velocity aware", () => {
   assert.match(hook, /passive:\s*false/);
   assert.match(hook, /--edge-swipe-back-x/);
   assert.match(hook, /velocity\s*>=\s*0\.45/);
+  assert.match(hook, /Only install it while a real left-edge gesture/);
+  assert.match(hook, /removeEventListener\("touchmove", handleTouchMove, true\)/);
+});
+
+test("built-in assistant preserves real voice and file attachments", () => {
+  const room = read("components/chat/mascot-chat-room.tsx");
+  const store = read("lib/mascot-chat-store.ts");
+  const engine = read("lib/mascot-engine.ts");
+  assert.match(room, /kind: "audio"/);
+  assert.match(room, /download=\{attachment\.name\}/);
+  assert.match(store, /attachments = \[\]/);
+  assert.match(engine, /attachments\?: Array/);
+});
+
+test("DeepSeek chat exposes scoped handoff status and tool traces", () => {
+  const room = read("components/chat/deepseek-assistant-chat-room.tsx");
+  assert.match(room, /runNextDeepSeekExecutionTask/);
+  assert.match(room, /permission_scope/);
+  assert.match(room, /task\.tool_trace/);
+  assert.match(room, /Eiren → DeepSeek 任务区/);
+});
+
+test("offline push repairs this device even when the local gate cache expired", () => {
+  const registrar = read("components/pwa-registrar.tsx");
+  assert.match(registrar, /cached === null/);
+  assert.match(registrar, /hasAccountPushSubscription\(\)/);
+  assert.match(registrar, /ensurePersonalPushSubscription\(\)/);
 });

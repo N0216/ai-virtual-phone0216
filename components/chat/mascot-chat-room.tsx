@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { AlertCircle, ChevronLeft, Code, Image as ImageIcon, MessageSquare, MoreHorizontal, RotateCcw, Sparkles, Trash2, UserRound } from "lucide-react";
+import { AlertCircle, ChevronLeft, Code, FileUp, Image as ImageIcon, MessageSquare, MoreHorizontal, RotateCcw, Sparkles, Trash2, UserRound } from "lucide-react";
 import { PageShell } from "@/components/ui/page-shell";
 import { ConfirmDialog } from "@/components/ui/modal";
 import { MediaPreviewOverlay } from "@/components/chat/media-preview-overlay";
@@ -45,6 +45,7 @@ import { ChatFallbackAvatar } from "./chat-fallback-avatar";
 import { CHAT_APP_SETTINGS_UPDATED_EVENT, loadChatAppSettings } from "@/lib/chat-storage";
 import { shouldSendChatInputOnEnter } from "@/lib/chat-input-keyboard";
 import { useChatBottomReserve } from "./use-chat-bottom-reserve";
+import { resolveCloudSttConfig, startCallRecording, transcribeAudioBlob, type ActiveCallRecording } from "@/lib/stt-cloud";
 
 type MascotChatRoomProps = {
     onBack: () => void;
@@ -464,6 +465,10 @@ export function MascotChatRoom({ onBack, onDeleted }: MascotChatRoomProps) {
     const [pendingImages, setPendingImages] = useState<string[]>([]);
     const [imagePreviewCache, setImagePreviewCache] = useState<Record<string, string>>({});
     const [showEmojiPanel, setShowEmojiPanel] = useState(false);
+    const [showPlusMenu, setShowPlusMenu] = useState(false);
+    const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+    const [voiceMode, setVoiceMode] = useState(false);
+    const [voiceState, setVoiceState] = useState<"idle" | "recording" | "processing" | "cancel">("idle");
     const [showInfo, setShowInfo] = useState(false);
     const [initialScrollReady, setInitialScrollReady] = useState(false);
     const [visibleMascotMessageCount, setVisibleMascotMessageCount] = useState(MASCOT_INITIAL_VISIBLE_MESSAGE_COUNT);
@@ -474,6 +479,9 @@ export function MascotChatRoom({ onBack, onDeleted }: MascotChatRoomProps) {
     const wrapperRef = useRef<HTMLDivElement | null>(null);
     const scrollRef = useRef<HTMLDivElement | null>(null);
     const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+    const voiceRecorderRef = useRef<ActiveCallRecording | null>(null);
+    const voicePressedRef = useRef(false);
+    const voiceStartYRef = useRef(0);
     const bottomScrollTimersRef = useRef<number[]>([]);
     const loadMoreRestoreRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
     const stickToBottomRef = useRef(true);
@@ -481,7 +489,7 @@ export function MascotChatRoom({ onBack, onDeleted }: MascotChatRoomProps) {
     const longPressStartRef = useRef<ContextMenuAnchor | null>(null);
     const longPressTriggeredRef = useRef(false);
     const identity = useMemo(() => resolveUserIdentity(), []);
-    useChatBottomReserve(wrapperRef, scrollRef, `${showEmojiPanel}:${pendingImages.length}`);
+    useChatBottomReserve(wrapperRef, scrollRef, `${showEmojiPanel}:${showPlusMenu}:${pendingImages.length}:${pendingFiles.length}`);
     const allVisibleMessageEntries = useMemo(() => (
         chat.messages
             .map((msg, rawIndex) => ({ msg, rawIndex }))
@@ -685,14 +693,25 @@ export function MascotChatRoom({ onBack, onDeleted }: MascotChatRoomProps) {
             stopMascotGeneration();
             return;
         }
-        const text = inputText.trim();
+        const selectedFiles = pendingFiles;
+        const fileNote = selectedFiles.length > 0
+            ? selectedFiles.map(file => `[文件：${file.name}，${Math.max(1, Math.ceil(file.size / 1024))}KB]`).join("\n")
+            : "";
+        const text = [inputText.trim(), fileNote].filter(Boolean).join("\n");
         if (!text && pendingImages.length === 0) return;
         setInputText("");
         textareaRef.current?.style.setProperty("height", "auto");
         const images = pendingImages;
         setPendingImages([]);
+        setPendingFiles([]);
         setShowEmojiPanel(false);
-        await sendMascotMessage({ text, images, context });
+        setShowPlusMenu(false);
+        const attachments: NonNullable<MascotMsg["attachments"]> = [];
+        for (const file of selectedFiles) {
+            if (file.size > 12 * 1024 * 1024) continue;
+            attachments.push({ kind: "file", name: file.name, mimeType: file.type || "application/octet-stream", size: file.size, dataUrl: await fileToDataUrl(file) });
+        }
+        await sendMascotMessage({ text, images, attachments, context });
     };
 
     const handleGenerateReply = async () => {
@@ -700,6 +719,50 @@ export function MascotChatRoom({ onBack, onDeleted }: MascotChatRoomProps) {
         setShowEmojiPanel(false);
         await generateMascotReply({ context });
     };
+
+    const beginVoiceHold = useCallback(async (event: ReactPointerEvent<HTMLButtonElement>) => {
+        if (voiceState !== "idle") return;
+        event.currentTarget.setPointerCapture?.(event.pointerId);
+        voicePressedRef.current = true;
+        voiceStartYRef.current = event.clientY;
+        setVoiceState("recording");
+        try {
+            const recorder = await startCallRecording();
+            if (!voicePressedRef.current) { recorder.cancel(); setVoiceState("idle"); return; }
+            voiceRecorderRef.current = recorder;
+        } catch (error) {
+            voicePressedRef.current = false;
+            setVoiceState("idle");
+            alert(error instanceof Error ? error.message : "无法使用麦克风");
+        }
+    }, [voiceState]);
+
+    const finishVoiceHold = useCallback(async (cancel: boolean) => {
+        voicePressedRef.current = false;
+        const recorder = voiceRecorderRef.current;
+        voiceRecorderRef.current = null;
+        if (!recorder) { setVoiceState("idle"); return; }
+        if (cancel || voiceState === "cancel") { recorder.cancel(); setVoiceState("idle"); return; }
+        setVoiceState("processing");
+        try {
+            const blob = await recorder.stop();
+            if (!blob) return;
+            const config = resolveCloudSttConfig();
+            if (!config) { alert("请先在语音配置中启用语音识别"); return; }
+            const text = (await transcribeAudioBlob(blob, config)).trim();
+            const dataUrl = await fileToDataUrl(blob);
+            await sendMascotMessage({
+                text: text ? `[语音消息] ${text}` : "[语音消息]",
+                images: [],
+                attachments: [{ kind: "audio", name: `语音-${Date.now()}.webm`, mimeType: blob.type || "audio/webm", size: blob.size, dataUrl }],
+                context,
+            });
+        } catch (error) {
+            alert(error instanceof Error ? error.message : "语音识别失败");
+        } finally { setVoiceState("idle"); }
+    }, [context, voiceState]);
+
+    useEffect(() => () => voiceRecorderRef.current?.cancel(), []);
 
     const closeMascotContextMenu = useCallback(() => {
         setActiveMascotMessageIndex(null);
@@ -884,6 +947,13 @@ export function MascotChatRoom({ onBack, onDeleted }: MascotChatRoomProps) {
         );
     };
 
+    const renderAttachments = (msg: MascotMsg) => {
+        if (!msg.attachments?.length) return null;
+        return <div className="mascot-inline-attachments">{msg.attachments.map((attachment, index) => attachment.kind === "audio"
+            ? <audio key={`${attachment.name}-${index}`} controls preload="metadata" src={attachment.dataUrl} />
+            : <a key={`${attachment.name}-${index}`} href={attachment.dataUrl} download={attachment.name}><FileUp size={18}/><span>{attachment.name}<small>{Math.max(1, Math.ceil(attachment.size / 1024))} KB</small></span></a>)}</div>;
+    };
+
     return (
         <div
             ref={wrapperRef}
@@ -1061,6 +1131,7 @@ export function MascotChatRoom({ onBack, onDeleted }: MascotChatRoomProps) {
                                         {toolSummary}
                                     </div>
                                     {renderImages(msg)}
+                                    {renderAttachments(msg)}
                                 </div>
                             </div>
                         );
@@ -1087,6 +1158,7 @@ export function MascotChatRoom({ onBack, onDeleted }: MascotChatRoomProps) {
                                 >
                                     {renderMascotContextMenu(rawIndex, msg.role)}
                                     {renderImages(msg)}
+                                    {renderAttachments(msg)}
                                     {getMascotMessageText(msg) ? (
                                         <BilingualTextBlock text={getMascotMessageText(msg)} mode="markdown" defaultExpanded />
                                     ) : null}
@@ -1121,7 +1193,16 @@ export function MascotChatRoom({ onBack, onDeleted }: MascotChatRoomProps) {
                         })}
                     </div>
                 )}
-                <textarea
+                {pendingFiles.length > 0 && <div className="mascot-pending-files">
+                    {pendingFiles.map((file, index) => <span key={`${file.name}-${index}`}>{file.name}<button type="button" onClick={() => setPendingFiles(files => files.filter((_, i) => i !== index))}>×</button></span>)}
+                </div>}
+                <div className="chat-composer-row">
+                <button type="button" onClick={() => { setVoiceMode(value => !value); setShowEmojiPanel(false); setShowPlusMenu(false); }} className="ui-bare-btn chat-composer-action" aria-label="语音输入" title="语音输入">
+                    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><circle cx="12" cy="12" r="10"/><path d="M8.5 13.5v-3M11 15.5v-7M13.5 14v-4M16 12.8v-1.6"/></svg>
+                </button>
+                {voiceMode ? <button type="button" className="chat-hold-to-talk" onPointerDown={beginVoiceHold} onPointerMove={event => { if (voicePressedRef.current) setVoiceState(event.clientY < voiceStartYRef.current - 60 ? "cancel" : "recording"); }} onPointerUp={() => void finishVoiceHold(false)} onPointerCancel={() => void finishVoiceHold(true)} onContextMenu={event => event.preventDefault()}>
+                    {voiceState === "processing" ? "识别中…" : voiceState === "cancel" ? "松开取消" : voiceState === "recording" ? "松开发送，上滑取消" : "按住说话"}
+                </button> : <textarea
                     ref={textareaRef}
                     rows={1}
                     value={inputText}
@@ -1152,64 +1233,33 @@ export function MascotChatRoom({ onBack, onDeleted }: MascotChatRoomProps) {
                        在 iOS PWA 上与键盘收起的 viewport 复原竞态，偶发把底部输入栏卡在屏幕外
                        （表现为发送后整条输入栏消失，退出重进恢复）。对齐普通聊天室：生成中可继续打字，
                        字留在框里；发送键在思考中仍是停止键。 */
-                />
-                <div className="chat-input-actions">
-                    <label
-                        className="ui-bare-btn text-[var(--c-text)]"
-                        aria-disabled={chat.isThinking || pendingImages.length >= 4}
-                        title={pendingImages.length >= 4 ? "最多 4 张图" : "添加图片"}
-                        onClick={(event) => {
-                            if (chat.isThinking || pendingImages.length >= 4) event.preventDefault();
-                        }}
-                    >
-                        <ImageIcon size={24} strokeWidth={1.5} />
-                        <input
-                            type="file"
-                            accept="image/*"
-                            multiple
-                            className="hidden"
-                            onChange={(event) => {
-                                const files = event.currentTarget.files ? Array.from(event.currentTarget.files) : [];
-                                event.currentTarget.value = "";
-                                void handlePickImages(files);
-                            }}
-                        />
-                    </label>
+                />}
                     <button
                         type="button"
                         onClick={() => setShowEmojiPanel((prev) => !prev)}
-                        className="ui-bare-btn text-[var(--c-text)]"
+                        className="ui-bare-btn chat-composer-action text-[var(--c-text)]"
                         aria-label="表情"
                     >
                         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><path d="M8 14s1.5 2 4 2 4-2 4-2" /><line x1="9" y1="9" x2="9.01" y2="9" /><line x1="15" y1="9" x2="15.01" y2="9" /></svg>
                     </button>
-                    <button
-                        type="button"
-                        onClick={() => void handleSend()}
-                        disabled={!chat.isThinking && !inputText.trim() && pendingImages.length === 0}
-                        className="ui-bare-btn text-[var(--c-text)]"
+                    {(chat.isThinking || inputText.trim() || pendingImages.length || pendingFiles.length) ? <button
+                        type="button" onClick={() => void handleSend()}
+                        className="chat-composer-send-button"
                         aria-label={chat.isThinking ? "停止生成" : "发送"}
-                    >
-                        {chat.isThinking ? (
+                    >{chat.isThinking ? (
                             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                                 <circle cx="12" cy="12" r="10" />
                                 <rect x="9" y="9" width="6" height="6" rx="1" />
                             </svg>
-                        ) : (
-                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
-                        )}
-                    </button>
-                    <button
-                        type="button"
-                        onClick={() => void handleGenerateReply()}
-                        disabled={!canGenerateReply}
-                        className="ui-bare-btn text-[var(--c-text)]"
-                        aria-label="重新生成回复"
-                        title="生成回复（发送后未生成或删除回复后使用）"
-                    >
-                        <Sparkles size={24} strokeWidth={1.5} />
-                    </button>
+                        ) : "发送"}</button> : <button type="button" onClick={() => { setShowPlusMenu(value => !value); setShowEmojiPanel(false); }} className="ui-bare-btn chat-composer-action" aria-label="更多功能">
+                        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 8v8M8 12h8"/></svg>
+                    </button>}
                 </div>
+                {showPlusMenu && <div className="chat-plus-menu mascot-plus-menu">
+                    <label className="chat-plus-menu-item"><span className="chat-plus-icon-box"><ImageIcon size={24}/></span><span>照片</span><input type="file" accept="image/*" multiple hidden onChange={event => { const files=Array.from(event.currentTarget.files || []); event.currentTarget.value=""; void handlePickImages(files); }} /></label>
+                    <label className="chat-plus-menu-item"><span className="chat-plus-icon-box"><FileUp size={24}/></span><span>文件</span><input type="file" multiple hidden onChange={event => { setPendingFiles(files => [...files, ...Array.from(event.currentTarget.files || [])].slice(0, 8)); event.currentTarget.value=""; }} /></label>
+                    <button type="button" className="chat-plus-menu-item" disabled={!canGenerateReply} onClick={() => void handleGenerateReply()}><span className="chat-plus-icon-box"><Sparkles size={24}/></span><span>继续回复</span></button>
+                </div>}
                 {showEmojiPanel && <EmojiPanel onSelect={appendEmoji} />}
             </div>
 

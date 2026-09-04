@@ -71,6 +71,8 @@ export type ChatSession = {
     };
     isBlacklisted?: boolean;
     customCSS?: string;
+    /** 会话时间显示格式；smart 为微信式智能日期。 */
+    chatTimeFormat?: "smart" | "clock" | "period" | "full";
     isMuted?: boolean;
     bilingualTranslationEnabled?: boolean;
     collapseBilingualTranslation?: boolean;

@@ -66,39 +66,27 @@ interface EmojiPanelProps {
     onSelect: (emoji: string) => void;
     /** 点击「特效」栏的特效表情：以该文本为消息内容直接发送并播放全屏特效 */
     onEffectSend?: (text: string) => void;
+    onStickerSend?: (name: string, stickerUrl?: string) => void;
+    characterId?: string;
+    characterIds?: string[];
 }
 
-export function EmojiPanel({ onSelect, onEffectSend }: EmojiPanelProps) {
-    const [emojiCategory, setEmojiCategory] = useState(0);
+export function EmojiPanel({ onSelect, onEffectSend, onStickerSend, characterId, characterIds }: EmojiPanelProps) {
+    const [panelMode, setPanelMode] = useState<"emoji" | "sticker" | "effect">("emoji");
     // 特效栏只显示启用中的内置特效；面板挂载时读取一次即可
     const [enabledEffects] = useState(() => {
         if (!onEffectSend) return [];
         const settings = loadBuiltinScreenEffectSettings();
         return BUILTIN_SCREEN_EFFECTS.filter(effect => settings[effect.type].enabled);
     });
-    const effectCategoryIndex = EMOJI_CATEGORIES.length;
     const showEffectTab = enabledEffects.length > 0;
+    const allEmoji = Array.from(new Set(EMOJI_CATEGORIES.flatMap(category => category.emojis)));
 
     return (
         <div className="h-[220px] flex flex-col">
-            <div className="flex gap-0.5 px-2 py-1 overflow-x-auto shrink-0 hide-scrollbar">
-                {showEffectTab && (
-                    <button
-                        onClick={() => setEmojiCategory(effectCategoryIndex)}
-                        className="emoji-category-pill"
-                        {...(emojiCategory === effectCategoryIndex ? { "data-active": "" } : {})}
-                    >特效</button>
-                )}
-                {EMOJI_CATEGORIES.map((cat, i) => (
-                    <button
-                        key={i}
-                        onClick={() => setEmojiCategory(i)}
-                        className="emoji-category-pill"
-                        {...(emojiCategory === i ? { "data-active": "" } : {})}
-                    >{cat.name}</button>
-                ))}
-            </div>
-            {emojiCategory === effectCategoryIndex && showEffectTab ? (
+            {panelMode === "sticker" && onStickerSend ? (
+                <StickerPanel onSend={onStickerSend} characterId={characterId} characterIds={characterIds} embedded />
+            ) : panelMode === "effect" && showEffectTab ? (
                 <div className="flex-1 overflow-auto px-2 py-1 grid grid-cols-4 gap-1.5 content-start hide-scrollbar">
                     {enabledEffects.map(effect => (
                         <button
@@ -114,7 +102,7 @@ export function EmojiPanel({ onSelect, onEffectSend }: EmojiPanelProps) {
                 </div>
             ) : (
                 <div className="flex-1 overflow-auto px-2 py-1 grid grid-cols-8 gap-0.5 content-start hide-scrollbar">
-                    {EMOJI_CATEGORIES[emojiCategory].emojis.map((emoji, i) => (
+                    {allEmoji.map((emoji, i) => (
                         <button
                             key={i}
                             onClick={() => onSelect(emoji)}
@@ -123,6 +111,11 @@ export function EmojiPanel({ onSelect, onEffectSend }: EmojiPanelProps) {
                     ))}
                 </div>
             )}
+            <div className="emoji-panel-tabs" role="tablist" aria-label="表情选择">
+                <button type="button" onClick={() => setPanelMode("emoji")} data-active={panelMode === "emoji" ? "" : undefined} aria-label="系统表情">☺</button>
+                {onStickerSend && <button type="button" onClick={() => setPanelMode("sticker")} data-active={panelMode === "sticker" ? "" : undefined} aria-label="表情包">♡</button>}
+                {showEffectTab && <button type="button" onClick={() => setPanelMode("effect")} data-active={panelMode === "effect" ? "" : undefined} aria-label="特效">✦</button>}
+            </div>
         </div>
     );
 }
@@ -133,9 +126,10 @@ interface StickerPanelProps {
     onSend: (name: string, stickerUrl?: string) => void;
     characterId?: string;
     characterIds?: string[];
+    embedded?: boolean;
 }
 
-export function StickerPanel({ onSend, characterId, characterIds }: StickerPanelProps) {
+export function StickerPanel({ onSend, characterId, characterIds, embedded = false }: StickerPanelProps) {
     const [stickerPacks, setStickerPacks] = useState<StickerPack[]>([]);
     const [activePackId, setActivePackId] = useState<string | null>(null);
     const [packUrlMap, setPackUrlMap] = useState<Record<string, string>>({});
@@ -168,7 +162,7 @@ export function StickerPanel({ onSend, characterId, characterIds }: StickerPanel
     const activePack = stickerPacks.find(pack => pack.id === activePackId) ?? stickerPacks[0] ?? null;
 
     return (
-        <div className="h-[220px] flex flex-col">
+        <div className={embedded ? "flex-1 min-h-0 flex flex-col" : "h-[220px] flex flex-col"}>
             {stickerPacks.length > 0 && (
                 <div className="flex gap-0.5 px-2 py-1 overflow-x-auto shrink-0 hide-scrollbar">
                     {stickerPacks.map(pack => (
