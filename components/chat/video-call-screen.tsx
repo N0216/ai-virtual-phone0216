@@ -21,6 +21,7 @@ import { CallSttWarningDialog, hideCallSttWarningPermanently, isCallSttWarningHi
 import { isAndroidBrowser, isIOSDevice } from "./voice-input-platform";
 import { CallVolumeControl } from "./call-volume-control";
 import { startIncomingCallVibration } from "@/lib/call-vibration";
+import { LocalCallRecordWriter } from "@/lib/call-record-storage";
 
 // ── Types ───────────────────────────────────────────
 
@@ -36,7 +37,19 @@ type SubtitleEntry = {
     id: string;
     role: "user" | "assistant";
     text: string;
+    createdAt: string;
 };
+
+function createTransientVideoCallMessage(sessionId: string, role: "user" | "assistant", content: string): ChatMessage {
+    return {
+        id: `video-call-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        sessionId,
+        role,
+        content,
+        status: "sent",
+        createdAt: new Date().toISOString(),
+    };
+}
 
 type VideoCallScreenProps = {
     session: ChatSession;
@@ -83,6 +96,9 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
     const [cameraError, setCameraError] = useState<string | null>(null);
     const [pipSwapped, setPipSwapped] = useState(false);
     const [showSttWarning, setShowSttWarning] = useState(false);
+    const subtitlesRef = useRef<SubtitleEntry[]>([]);
+    const callRecordWriterRef = useRef<LocalCallRecordWriter | null>(null);
+    const endingRef = useRef(false);
 
     const sttRef = useRef<STTSession | null>(null);
     const audioAbortRef = useRef<(() => void) | null>(null);
@@ -102,6 +118,24 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
     const userAvatarRef = useRef<string | null>(_initUi?.avatarUrl || null);
 
     useEffect(() => { stateRef.current = callState; }, [callState]);
+    const appendSubtitle = useCallback((entry: SubtitleEntry) => {
+        subtitlesRef.current = [...subtitlesRef.current, entry];
+        setSubtitles(subtitlesRef.current);
+        callRecordWriterRef.current?.updateTranscript(subtitlesRef.current.map(item => ({
+            id: item.id,
+            role: item.role,
+            content: item.text,
+            createdAt: item.createdAt,
+        })));
+    }, []);
+    const checkpointCallRecord = useCallback((interim = interimTextRef.current) => {
+        callRecordWriterRef.current?.checkpointTranscript(subtitlesRef.current.map(item => ({
+            id: item.id,
+            role: item.role,
+            content: item.text,
+            createdAt: item.createdAt,
+        })), interim);
+    }, []);
 
     // 来电等待接听：循环振动（开关在聊天主页，iOS 网页不支持自动无效果）
     useEffect(() => {
@@ -288,7 +322,8 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
 
         const lastMsg = messagesRef.current[messagesRef.current.length - 1];
         const initRole = initiator === "character" ? "assistant" : "user";
-        if (!lastMsg || !(lastMsg.content.includes("发起了视频通话"))) {
+        let startMsg = lastMsg?.content.includes("发起了视频通话") ? lastMsg : null;
+        if (!startMsg) {
             const callMsg = initiator === "character"
                 ? `[我向${userNameRef.current}发起了视频通话]`
                 : `[我向${character.name}发起了视频通话]`;
@@ -298,7 +333,16 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
                 content: callMsg,
             });
             messagesRef.current = [...messagesRef.current, sysMsg];
+            startMsg = sysMsg;
         }
+        callRecordWriterRef.current = new LocalCallRecordWriter({
+            id: `call_${startMsg.id}`,
+            sessionId: session.id,
+            type: "video",
+            initiatorRole: initRole === "assistant" ? "assistant" : "user",
+            startedAt: startMsg.createdAt,
+            legacyStartMessageId: startMsg.id,
+        });
 
         // User-initiated: auto-connect after 3s fake dial
         // Character-initiated: wait for user to accept
@@ -352,8 +396,7 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
         );
 
         if (chatParts.length === 0 && (statusPanel || innerMonologue)) {
-            const aiMsg = pushChatMessage({
-                sessionId: session.id, role: "assistant", content: "",
+            const aiMsg = Object.assign(createTransientVideoCallMessage(session.id, "assistant", ""), {
                 statusPanel,
                 innerMonologue, stateValues: stateValues.length > 0 ? stateValues : undefined,
                 freshStateValues,
@@ -361,8 +404,7 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
             messagesRef.current = [...messagesRef.current, aiMsg];
         } else {
             const newMsgs = chatParts.map((part, idx) =>
-                pushChatMessage({
-                    sessionId: session.id, role: "assistant", content: part.content,
+                Object.assign(createTransientVideoCallMessage(session.id, "assistant", part.content), {
                     mediaType: part.mediaType,
                     mediaData: part.mediaData,
                     statusPanel: idx === 0 && statusPanel ? statusPanel : undefined,
@@ -385,12 +427,13 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
 
     const runConversationTurn = useCallback(async (userText?: string) => {
         if (userText) {
-            const userMsg = pushChatMessage({ sessionId: session.id, role: "user", content: userText });
+            const userMsg = createTransientVideoCallMessage(session.id, "user", userText);
             messagesRef.current = [...messagesRef.current, userMsg];
-            setSubtitles(prev => [...prev, { id: userMsg.id, role: "user", text: userText }]);
+            appendSubtitle({ id: userMsg.id, role: "user", text: userText, createdAt: userMsg.createdAt });
         }
         setCallState("PROCESSING");
         setInterimText("");
+        interimTextRef.current = "";
 
         try {
             const frame = captureCameraFrame();
@@ -406,7 +449,7 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
 
             if (!displayText) { setCallState("IDLE"); return; }
 
-            setSubtitles(prev => [...prev, { id: `ai-${Date.now()}`, role: "assistant", text: displayText }]);
+            appendSubtitle({ id: `ai-${Date.now()}`, role: "assistant", text: displayText, createdAt: new Date().toISOString() });
             setCallState("AI_SPEAKING");
 
             const voiceConfig = resolveVoiceConfig(session.contactId);
@@ -426,11 +469,11 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
             if (stateRef.current !== "ENDED") setCallState("IDLE");
         } catch (error: any) {
             if (stateRef.current !== "ENDED") {
-                setSubtitles(prev => [...prev, { id: `err-${Date.now()}`, role: "assistant", text: `⚠️ ${error?.message || "发送失败"}` }]);
+                appendSubtitle({ id: `err-${Date.now()}`, role: "assistant", text: `⚠️ ${error?.message || "发送失败"}`, createdAt: new Date().toISOString() });
                 setCallState("IDLE");
             }
         }
-    }, [session, processAIResponse, captureCameraFrame, playCallAudio]);
+    }, [appendSubtitle, session, processAIResponse, captureCameraFrame, playCallAudio]);
 
     // ── Auto-listen ────────────────────────────────
 
@@ -446,6 +489,7 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
         const stt = createSTTSession({
             onInterim: (text) => {
                 setInterimText(text); interimTextRef.current = text;
+                checkpointCallRecord(text);
                 if (stateRef.current === "IDLE") setCallState("USER_SPEAKING");
             },
             onFinal: (text) => {
@@ -481,7 +525,7 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
             sttRef.current = null;
             showSttCompatibilityWarning();
         }
-    }, [androidTextInputOnly, holdToTalk, runConversationTurn, session.contactId, showSttCompatibilityWarning]);
+    }, [androidTextInputOnly, checkpointCallRecord, holdToTalk, runConversationTurn, session.contactId, showSttCompatibilityWarning]);
 
     useEffect(() => {
         if (holdToTalk) return; // 按住说话模式无自动监听
@@ -544,8 +588,11 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
 
     // ── Hangup ──────────────────────────────────────
 
-    const handleHangup = useCallback(() => {
+    const handleHangup = useCallback(async () => {
+        if (endingRef.current) return;
+        endingRef.current = true;
         setCallState("ENDED");
+        checkpointCallRecord();
         if (sttRef.current) { sttRef.current.abort(); sttRef.current = null; }
         if (audioAbortRef.current) { audioAbortRef.current(); audioAbortRef.current = null; }
         stopCameraStream();
@@ -554,23 +601,55 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
         const endMsg = pushChatMessage({
             sessionId: session.id, role: "user",
             content: `[我挂断了视频通话]`,
-            mediaData: { callDuration: formatTime(callDuration) },
+            mediaData: {
+                callDuration: formatTime(callDuration),
+                callTranscript: subtitlesRef.current
+                    .filter(item => item.text.trim() && !item.text.trim().startsWith("⚠️"))
+                    .map(item => ({ id: item.id, role: item.role, content: item.text, createdAt: item.createdAt })),
+            },
         });
         messagesRef.current = [...messagesRef.current, endMsg];
-        setTimeout(() => onEnd(), 1500);
-    }, [session.id, callDuration, onEnd, stopCameraStream]);
+        try {
+            await callRecordWriterRef.current?.finalize("ended", formatTime(callDuration), {
+                endedAt: endMsg.createdAt,
+                legacyEndMessageId: endMsg.id,
+            });
+        } catch (error) {
+            console.warn("[VideoCall] failed to finalize local call record:", error);
+        }
+        onEnd();
+    }, [session.id, callDuration, onEnd, stopCameraStream, checkpointCallRecord]);
+
+    const finishUnconnectedCall = useCallback(async (
+        state: "cancelled" | "rejected",
+        content: string,
+    ) => {
+        if (endingRef.current) return;
+        endingRef.current = true;
+        const endMsg = pushChatMessage({ sessionId: session.id, role: "user", content });
+        try {
+            await callRecordWriterRef.current?.finalize(state, "00:00", {
+                endedAt: endMsg.createdAt,
+                legacyEndMessageId: endMsg.id,
+            });
+        } catch (error) {
+            console.warn("[VideoCall] failed to finalize unanswered call record:", error);
+        }
+        onEnd();
+    }, [onEnd, session.id]);
 
     // 通话音频会话 + 卸载兜底：不经挂断键退出时释放识别与在途播放，
     // 防止识别自动重启循环在后台无限自我重启、麦克风永不归还（详见 voice-call-screen）。
     useEffect(() => {
         setCallAudioSessionActive(true);
         return () => {
+            checkpointCallRecord();
             stateRef.current = "ENDED";
             if (sttRef.current) { sttRef.current.abort(); sttRef.current = null; }
             if (audioAbortRef.current) { audioAbortRef.current(); audioAbortRef.current = null; }
             setCallAudioSessionActive(false);
         };
-    }, []);
+    }, [checkpointCallRecord]);
 
     // ── Render ──────────────────────────────────────
 
@@ -947,10 +1026,7 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
                     /* Incoming call: accept + decline */
                     <>
                         <button
-                            onClick={() => {
-                                pushChatMessage({ sessionId: session.id, role: "user", content: `[我拒绝了视频通话]` });
-                                onEnd();
-                            }}
+                            onClick={() => { void finishUnconnectedCall("rejected", `[我拒绝了视频通话]`); }}
                             className="ui-call-btn ui-call-btn-danger"
                         >
                             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -970,10 +1046,7 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
                 ) : callState === "CONNECTING" ? (
                     /* User-initiated: show cancel only */
                     <button
-                        onClick={() => {
-                            pushChatMessage({ sessionId: session.id, role: "user", content: `[我取消了视频通话]` });
-                            onEnd();
-                        }}
+                        onClick={() => { void finishUnconnectedCall("cancelled", `[我取消了视频通话]`); }}
                         className="ui-call-btn ui-call-btn-danger"
                     >
                         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

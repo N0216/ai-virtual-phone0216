@@ -1,7 +1,9 @@
 "use client";
 
-import { useState, type CSSProperties } from "react";
+import { useMemo, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
+import { loadCharacters } from "@/lib/character-storage";
+import { addPhotoAlbumItem } from "@/lib/photo-album-storage";
 
 const ACTION_BUTTON_STYLE: CSSProperties = {
     color: "#fff",
@@ -25,6 +27,8 @@ export function MediaPreviewOverlay({
     saveFilename,
     onRegenerate,
     regenerating,
+    albumCharacterId,
+    albumTitle,
     onClose,
 }: {
     imageUrl?: string | null;
@@ -32,10 +36,16 @@ export function MediaPreviewOverlay({
     saveFilename?: string;
     onRegenerate?: () => void;
     regenerating?: boolean;
+    albumCharacterId?: string;
+    albumTitle?: string;
     onClose: () => void;
 }) {
     // 保存要重新拉一次图片，慢网络下会卡一下——按钮上给个状态
     const [saving, setSaving] = useState(false);
+    const [savingToAlbum, setSavingToAlbum] = useState(false);
+    const [albumSaved, setAlbumSaved] = useState(false);
+    const characters = useMemo(() => loadCharacters(), []);
+    const [albumOwner, setAlbumOwner] = useState(albumCharacterId || "user");
     if (typeof document === "undefined") return null;
     return createPortal(
         <div
@@ -72,6 +82,46 @@ export function MediaPreviewOverlay({
                     >
                         {saving ? "保存中…" : "保存图片"}
                     </button>
+                )}
+                {imageUrl && albumTitle && (
+                    <>
+                        <select
+                            aria-label="保存到相册"
+                            value={albumOwner}
+                            onChange={event => setAlbumOwner(event.target.value)}
+                            style={{ ...ACTION_BUTTON_STYLE, maxWidth: 150 }}
+                        >
+                            <option value="user">我的相册</option>
+                            {characters.map(character => <option key={character.id} value={character.id}>{character.name}的相册</option>)}
+                        </select>
+                        <button
+                            disabled={savingToAlbum || albumSaved}
+                            onClick={async event => {
+                                event.stopPropagation();
+                                setSavingToAlbum(true);
+                                try {
+                                    const response = await fetch(imageUrl);
+                                    if (!response.ok) throw new Error(`读取图片失败 ${response.status}`);
+                                    const blob = await response.blob();
+                                    const ownerType = albumOwner === "user" ? "user" : "character";
+                                    await addPhotoAlbumItem({
+                                        blob,
+                                        title: albumTitle,
+                                        ownerType,
+                                        ownerId: ownerType === "character" ? albumOwner : undefined,
+                                        source: "generated",
+                                        allowCheckPhone: false,
+                                    });
+                                    setAlbumSaved(true);
+                                } finally {
+                                    setSavingToAlbum(false);
+                                }
+                            }}
+                            style={ACTION_BUTTON_STYLE}
+                        >
+                            {albumSaved ? "已存入相册" : savingToAlbum ? "保存中…" : "存入相册"}
+                        </button>
+                    </>
                 )}
                 {onRegenerate && (
                     <button

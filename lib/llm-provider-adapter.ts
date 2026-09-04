@@ -10,6 +10,8 @@ import {
     stripHallucinatedTimestamps,
     usesMaxCompletionTokens,
 } from "./api-helpers";
+import { buildCharacterTimeContext, TEMPORAL_AWARENESS_TAG } from "./character-time";
+import { resolvePromptTimeAware } from "./prompt-time";
 
 export type LlmProviderKind = "openai-compatible" | "openai-responses" | "anthropic" | "gemini";
 export type NativeToolProtocol = "openai-compatible" | "anthropic" | "gemini";
@@ -51,7 +53,7 @@ export type LlmParsedResponse = {
     reasoning?: string;
     openRouterReasoningDetails?: unknown[];
     toolCalls: LlmToolCall[];
-    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; cached_prompt_tokens?: number };
     raw: unknown;
 };
 
@@ -241,6 +243,62 @@ function stripVisionParts(messages: LlmRequestMessage[]): LlmRequestMessage[] {
     });
 }
 
+function contentContainsTemporalAwareness(content: string | LLMContentPart[]): boolean {
+    if (typeof content === "string") return content.includes(`<${TEMPORAL_AWARENESS_TAG}`);
+    return content.some(part => part.type === "text" && part.text.includes(`<${TEMPORAL_AWARENESS_TAG}`));
+}
+
+const RUNTIME_MODEL_IDENTITY_TAG = "runtime_model_identity";
+
+function escapeRuntimeFact(value: string): string {
+    return value
+        .replace(/&/g, "&amp;")
+        .replace(/"/g, "&quot;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+}
+
+function contentContainsRuntimeModelIdentity(content: string | LLMContentPart[]): boolean {
+    if (typeof content === "string") return content.includes(`<${RUNTIME_MODEL_IDENTITY_TAG}`);
+    return content.some(part => part.type === "text" && part.text.includes(`<${RUNTIME_MODEL_IDENTITY_TAG}`));
+}
+
+/**
+ * 让小手机里的角色与助手知道本轮真正使用的底层模型。只注入模型运行事实，
+ * 不包含 API Key、Base URL 等秘密；角色可以在被问到时如实回答，但不会在
+ * 无关对话中反复报模型名，也不会把运行模型误当成人物身份。
+ */
+function ensureProviderModelIdentity(config: ApiConfig, messages: LlmRequestMessage[]): LlmRequestMessage[] {
+    if (messages.some(message => contentContainsRuntimeModelIdentity(message.content))) return messages;
+    const provider = config.provider.trim() || "unknown";
+    const model = config.defaultModel.trim() || "unknown";
+    const content = [
+        `<${RUNTIME_MODEL_IDENTITY_TAG} provider="${escapeRuntimeFact(provider)}" model="${escapeRuntimeFact(model)}">`,
+        `当前实际底层模型：${model}。当前接口类型：${provider}。`,
+        "这是本轮请求的运行环境事实，不是角色姓名或人物设定。用户询问时请如实回答；无关对话中不要主动强调。你不能自行切换模型。不要猜测或泄露 API Key、接口地址等未提供的秘密。",
+        `</${RUNTIME_MODEL_IDENTITY_TAG}>`,
+    ].join("\n");
+    return [{ role: "system", content, marker: RUNTIME_MODEL_IDENTITY_TAG }, ...messages];
+}
+
+/**
+ * 最底层总闸：所有走模型适配器的小手机功能都至少拿到当前时间。
+ * 角色聊天等上层入口会带更完整的角色时区与真实消息间隔；这里仅为绕开
+ * 提示词装配器的助手、诊断和未来新功能补一个不重复的基础时间块。
+ */
+function ensureProviderTemporalAwareness(messages: LlmRequestMessage[]): LlmRequestMessage[] {
+    let enabled = true;
+    try {
+        enabled = resolvePromptTimeAware();
+    } catch {
+        // 非浏览器测试环境没有设置存储时，保持默认开启。
+    }
+    if (!enabled || messages.some(message => contentContainsTemporalAwareness(message.content))) return messages;
+    const timeContext = buildCharacterTimeContext(undefined, new Date()).timeContext;
+    if (!timeContext.trim()) return messages;
+    return [{ role: "system", content: timeContext, marker: TEMPORAL_AWARENESS_TAG }, ...messages];
+}
+
 export function buildProviderRequest(
     config: ApiConfig,
     preset: PresetConfig | null,
@@ -260,7 +318,8 @@ export function buildProviderRequest(
 
     // 图像识别关闭时的总闸：无论哪条路径塞入了 image_url part，一律降级为
     // "[图片]" 文本，避免不支持视觉的模型（如 DeepSeek）收到 multipart 返回 400。
-    const guardedMessages = config.enableImageRecognition === true ? messages : stripVisionParts(messages);
+    const runtimeAwareMessages = ensureProviderModelIdentity(config, ensureProviderTemporalAwareness(messages));
+    const guardedMessages = config.enableImageRecognition === true ? runtimeAwareMessages : stripVisionParts(runtimeAwareMessages);
     const providerMessages = ensureProviderHasUserMessage(normalizeNativeToolMessageAdjacency(guardedMessages));
 
     // GPT-5 reasoning models cannot combine function tools with reasoning_effort
@@ -897,6 +956,9 @@ function parseOpenAIResponsesResponse(data: unknown): LlmParsedResponse {
             prompt_tokens: typeof usage.input_tokens === "number" ? usage.input_tokens : undefined,
             completion_tokens: typeof usage.output_tokens === "number" ? usage.output_tokens : undefined,
             total_tokens: typeof usage.total_tokens === "number" ? usage.total_tokens : undefined,
+            cached_prompt_tokens: typeof asRecord(usage.input_tokens_details).cached_tokens === "number"
+                ? asRecord(usage.input_tokens_details).cached_tokens as number
+                : undefined,
         } : undefined,
         raw: data,
     };

@@ -18,6 +18,7 @@ import { useCallKeyboardOffsetStyle } from "./use-call-keyboard-offset";
 import { isAndroidBrowser, isIOSDevice } from "./voice-input-platform";
 import { CallVolumeControl } from "./call-volume-control";
 import { startIncomingCallVibration } from "@/lib/call-vibration";
+import { LocalCallRecordWriter } from "@/lib/call-record-storage";
 
 // ── Types ───────────────────────────────────────────
 
@@ -33,6 +34,7 @@ type SubtitleEntry = {
     id: string;
     role: "user" | "assistant";
     text: string;
+    createdAt: string;
     senderName?: string;
     senderCharacterId?: string;
 };
@@ -72,6 +74,9 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
     const hasConnectedRef = useRef(false);
     const [callDuration, setCallDuration] = useState(0);
     const [subtitles, setSubtitles] = useState<SubtitleEntry[]>([]);
+    const subtitlesRef = useRef<SubtitleEntry[]>([]);
+    const callRecordWriterRef = useRef<LocalCallRecordWriter | null>(null);
+    const endingRef = useRef(false);
     const [interimText, setInterimText] = useState("");
     const [isMuted, setIsMuted] = useState(false);
     const [inputMode, setInputMode] = useState<"voice" | "text">(() => androidTextInputOnly ? "text" : "voice");
@@ -169,7 +174,8 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
 
         const lastMsg = messagesRef.current[messagesRef.current.length - 1];
         const initRole = initiator === "character" ? "assistant" : "user";
-        if (!lastMsg || !(lastMsg.content.includes(`发起了${callTypeLabel}`))) {
+        let startMsg = lastMsg?.content.includes(`发起了${callTypeLabel}`) ? lastMsg : null;
+        if (!startMsg) {
             const callMsg = `[我向群聊发起了${callTypeLabel}]`;
             const initCharId = initiator === "character" ? characters.find(c => c.name === initiatorName)?.id : undefined;
             const sysMsg = pushChatMessage({
@@ -177,7 +183,16 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
                 ...(initCharId ? { senderCharacterId: initCharId, senderName: initiatorName } : {}),
             });
             messagesRef.current = [...messagesRef.current, sysMsg];
+            startMsg = sysMsg;
         }
+        callRecordWriterRef.current = new LocalCallRecordWriter({
+            id: `call_${startMsg.id}`,
+            sessionId: session.id,
+            type,
+            initiatorRole: initRole === "assistant" ? "assistant" : "user",
+            startedAt: startMsg.createdAt,
+            legacyStartMessageId: startMsg.id,
+        });
 
         let connectTimer: NodeJS.Timeout | undefined;
         if (initiator !== "character") {
@@ -213,6 +228,29 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
         }
     };
 
+    const appendSubtitle = useCallback((entry: SubtitleEntry) => {
+        subtitlesRef.current = [...subtitlesRef.current, entry];
+        setSubtitles(subtitlesRef.current);
+        callRecordWriterRef.current?.updateTranscript(subtitlesRef.current.map(item => ({
+            id: item.id,
+            role: item.role,
+            content: item.text,
+            createdAt: item.createdAt,
+            senderName: item.senderName,
+            senderCharacterId: item.senderCharacterId,
+        })));
+    }, []);
+    const checkpointCallRecord = useCallback((interim = interimTextRef.current) => {
+        callRecordWriterRef.current?.checkpointTranscript(subtitlesRef.current.map(item => ({
+            id: item.id,
+            role: item.role,
+            content: item.text,
+            createdAt: item.createdAt,
+            senderName: item.senderName,
+            senderCharacterId: item.senderCharacterId,
+        })), interim);
+    }, []);
+
     // ── Conversation turn ────────────────────────────
     const runConversationTurn = useCallback(async (userText?: string) => {
         if (userText) {
@@ -220,11 +258,12 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
                 sessionId: session.id, role: "user", content: userText,
             });
             messagesRef.current = [...messagesRef.current, userMsg];
-            setSubtitles(prev => [...prev, { id: userMsg.id, role: "user", text: userText }]);
+            appendSubtitle({ id: userMsg.id, role: "user", text: userText, createdAt: userMsg.createdAt });
         }
 
         setCallState("PROCESSING");
         setInterimText("");
+        interimTextRef.current = "";
 
         try {
             const results = await generateGroupChatCompletion(session, messagesRef.current, undefined, {
@@ -258,12 +297,13 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
                 });
                 messagesRef.current = [...messagesRef.current, aiMsg];
 
-                setSubtitles(prev => [...prev, {
+                appendSubtitle({
                     id: aiMsg.id, role: "assistant",
                     text: displayText,
+                    createdAt: aiMsg.createdAt,
                     senderName: r.characterName,
                     senderCharacterId: r.characterId,
-                }]);
+                });
 
                 // TTS with this character's own voice config
                 setCallState("AI_SPEAKING");
@@ -290,14 +330,15 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
         } catch (error: any) {
             console.error("[GroupCall] Error:", error);
             if (stateRef.current !== "ENDED") {
-                setSubtitles(prev => [...prev, {
+                appendSubtitle({
                     id: `err-${Date.now()}`, role: "assistant",
                     text: `⚠️ ${error?.message || "发送失败"}`,
-                }]);
+                    createdAt: new Date().toISOString(),
+                });
                 setCallState("IDLE");
             }
         }
-    }, [isVideo, session, playCallAudio]);
+    }, [appendSubtitle, isVideo, session, playCallAudio]);
 
     // ── Auto-listen ──────────────────────────────────
     const startListening = useCallback(() => {
@@ -314,6 +355,7 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
             onInterim: (text) => {
                 setInterimText(text);
                 interimTextRef.current = text;
+                checkpointCallRecord(text);
                 if (stateRef.current === "IDLE") setCallState("USER_SPEAKING");
             },
             onFinal: (text) => {
@@ -345,7 +387,7 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
 
         sttRef.current = stt;
         if (stt.isSupported) stt.start();
-    }, [androidTextInputOnly, holdToTalk, runConversationTurn, characters]);
+    }, [androidTextInputOnly, checkpointCallRecord, holdToTalk, runConversationTurn, characters]);
 
     useEffect(() => {
         if (holdToTalk) return; // 按住说话模式无自动监听
@@ -402,7 +444,12 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
         },
         onTranscript: (text) => { void runConversationTurn(text); },
         onError: (message) => {
-            setSubtitles(prev => [...prev, { id: `stt-err-${Date.now()}`, role: "assistant", text: `⚠️ ${message}` }]);
+            appendSubtitle({
+                id: `stt-err-${Date.now()}`,
+                role: "assistant",
+                text: `⚠️ ${message}`,
+                createdAt: new Date().toISOString(),
+            });
             if (stateRef.current === "USER_SPEAKING" || stateRef.current === "PROCESSING") {
                 setCallState("IDLE");
             }
@@ -410,31 +457,73 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
     });
 
     // ── Hangup ──────────────────────────────────────
-    const handleHangup = useCallback(() => {
+    const handleHangup = useCallback(async () => {
+        if (endingRef.current) return;
+        endingRef.current = true;
         setCallState("ENDED");
+        checkpointCallRecord();
         if (sttRef.current) { sttRef.current.abort(); sttRef.current = null; }
         if (audioAbortRef.current) { audioAbortRef.current(); audioAbortRef.current = null; }
         if (window.speechSynthesis) window.speechSynthesis.cancel();
 
-        pushChatMessage({
+        const endMsg = pushChatMessage({
             sessionId: session.id, role: "user",
             content: `[我挂断了群${callTypeLabel}](时长 ${formatTime(callDuration)})`,
+            mediaData: {
+                callDuration: formatTime(callDuration),
+                callTranscript: subtitlesRef.current.map(entry => ({
+                    id: entry.id,
+                    role: entry.role,
+                    content: entry.text,
+                    createdAt: entry.createdAt,
+                    senderName: entry.senderName,
+                    senderCharacterId: entry.senderCharacterId,
+                })),
+            },
         });
 
+        try {
+            await callRecordWriterRef.current?.finalize("ended", formatTime(callDuration), {
+                endedAt: endMsg.createdAt,
+                legacyEndMessageId: endMsg.id,
+            });
+        } catch (error) {
+            console.warn("[GroupCall] failed to finalize local call record:", error);
+        }
+
         setTimeout(() => onEnd(), 1500);
-    }, [session.id, callDuration, onEnd, callTypeLabel]);
+    }, [session.id, callDuration, onEnd, callTypeLabel, checkpointCallRecord]);
+
+    const finishUnconnectedCall = useCallback(async (
+        state: "cancelled" | "rejected",
+        content: string,
+    ) => {
+        if (endingRef.current) return;
+        endingRef.current = true;
+        const endMsg = pushChatMessage({ sessionId: session.id, role: "user", content });
+        try {
+            await callRecordWriterRef.current?.finalize(state, "00:00", {
+                endedAt: endMsg.createdAt,
+                legacyEndMessageId: endMsg.id,
+            });
+        } catch (error) {
+            console.warn("[GroupCall] failed to finalize unanswered call record:", error);
+        }
+        onEnd();
+    }, [onEnd, session.id]);
 
     // 通话音频会话 + 卸载兜底：不经挂断键退出时释放识别与在途播放，
     // 防止识别自动重启循环在后台无限自我重启、麦克风永不归还（详见 voice-call-screen）。
     useEffect(() => {
         setCallAudioSessionActive(true);
         return () => {
+            checkpointCallRecord();
             stateRef.current = "ENDED";
             if (sttRef.current) { sttRef.current.abort(); sttRef.current = null; }
             if (audioAbortRef.current) { audioAbortRef.current(); audioAbortRef.current = null; }
             setCallAudioSessionActive(false);
         };
-    }, []);
+    }, [checkpointCallRecord]);
 
     // ── Control buttons (shared between voice and video) ──
     const renderTextInputPanel = (floating = false) => {
@@ -597,13 +686,7 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
             return (
                 <>
                     <button
-                        onClick={() => {
-                            pushChatMessage({
-                                sessionId: session.id, role: "user",
-                                content: `[我拒绝了群${callTypeLabel}]`,
-                            });
-                            onEnd();
-                        }}
+                        onClick={() => { void finishUnconnectedCall("rejected", `[我拒绝了群${callTypeLabel}]`); }}
                         className="ui-call-btn ui-call-btn-danger"
                     >
                         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -622,13 +705,7 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
         if (callState === "CONNECTING") {
             return (
                 <button
-                    onClick={() => {
-                        pushChatMessage({
-                            sessionId: session.id, role: "user",
-                            content: `[我取消了群${callTypeLabel}]`,
-                        });
-                        onEnd();
-                    }}
+                    onClick={() => { void finishUnconnectedCall("cancelled", `[我取消了群${callTypeLabel}]`); }}
                     className="ui-call-btn ui-call-btn-danger"
                 >
                     <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

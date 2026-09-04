@@ -329,11 +329,16 @@ async function buildGroupChatPromptMessages(
     const allWorldBooks = loadWorldBooks();
 
     const now = new Date();
+    const timeAware = loadChatAppSettings().timeAware;
     const memberTimeContexts: Record<string, ReturnType<typeof buildCharacterTimeContext>> = {};
     const memberDataPromises = participantIds.map(async (charId): Promise<GroupMemberData | null> => {
         const character = charMap.get(charId);
         if (!character) return null;
-        const memberTimeContext = buildCharacterTimeContext(character.timeZone, now);
+        const memberTimeContext = buildCharacterTimeContext(
+            character.timeZone,
+            now,
+            timeAware === false ? undefined : history,
+        );
         memberTimeContexts[charId] = memberTimeContext;
         const scheduleSummary = buildCalendarScheduleMarker("character", charId, getWeekStartIso(now));
         const currentSchedule = getCurrentCalendarScheduleForPrompt("character", charId, now);
@@ -377,6 +382,7 @@ async function buildGroupChatPromptMessages(
     const groupTimeContext = buildGroupTimeContext(
         members.map(m => ({ name: m.character.name, timeZone: m.character.timeZone })),
         now,
+        timeAware === false ? undefined : history,
     );
     const groupPromptTimestampOptions = getPromptTimestampOptionsForTimeContext(groupTimeContext);
 
@@ -475,7 +481,7 @@ async function buildGroupChatPromptMessages(
         memberTimeContexts,
         promptTimestampOptions: groupPromptTimestampOptions,
         enableVision: config.enableImageRecognition,
-        timeAware: loadChatAppSettings().timeAware,
+        timeAware,
         tools: toolsPrompt,
         groupTools: groupToolsPrompt,
         groupRoster,

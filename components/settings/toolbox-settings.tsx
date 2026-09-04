@@ -32,12 +32,15 @@ import {
     MUSIC_CONTROL_CAPABILITY_ID,
     NOTE_WALL_CAPABILITY_ID,
     TOOLBOX_MANAGEMENT_CAPABILITY_ID,
+    USER_VIEW_READ_CAPABILITY_ID,
 } from "@/lib/internal-capability-storage";
 import { discoverMcpTools, startMcpOAuth } from "@/lib/tool-executor";
 import { getMaxToolRounds, loadChatAppSettings, saveChatAppSettings } from "@/lib/chat-storage";
 import { SettingsContext } from "@/components/phone-settings-app";
 import { Toggle, Input, Textarea, Select } from "@/components/ui/form";
 import { ConfirmDialog, ContentDialog } from "@/components/ui/modal";
+import { DeepSeekExecutionSettings } from "@/components/settings/deepseek-execution-settings";
+import { syncUserViewReadPolicyToCloud } from "@/lib/user-view-read-cloud";
 
 type ToolExportEntry = {
     key: string;
@@ -206,7 +209,15 @@ export function ToolboxSettings() {
         persistMcp(mcpServers.map(s => s.id === id ? { ...s, ...updates, updatedAt: Date.now() } : s));
     }
     function updateInternalCapability(id: string, updates: Partial<InternalCapabilityConfig>) {
-        persistInternal(internalCapabilities.map(item => item.id === id ? { ...item, ...updates, updatedAt: Date.now() } : item));
+        const next = internalCapabilities.map(item => item.id === id ? { ...item, ...updates, updatedAt: Date.now() } : item);
+        persistInternal(next);
+        if (id === USER_VIEW_READ_CAPABILITY_ID) {
+            const capability = next.find(item => item.id === id);
+            const enabled = Boolean(capability?.enabled && capability.mode !== "off");
+            void syncUserViewReadPolicyToCloud(enabled).catch(error => {
+                console.warn("[UserViewRead] cloud policy sync failed:", error);
+            });
+        }
     }
     async function updateCustomAppToolEnabled(tool: CustomAppToolEntry, enabled: boolean) {
         const now = new Date().toISOString();
@@ -261,11 +272,11 @@ export function ToolboxSettings() {
     }
 
     function defaultInternalMode(id: string): InternalCapabilityConfig["mode"] {
-        return id === NOTE_WALL_CAPABILITY_ID || id === MUSIC_CONTROL_CAPABILITY_ID || id === CALENDAR_MANAGEMENT_CAPABILITY_ID || id === LOCAL_DATA_LIBRARY_CAPABILITY_ID || id === TOOLBOX_MANAGEMENT_CAPABILITY_ID ? "auto" : "confirm";
+        return id === NOTE_WALL_CAPABILITY_ID || id === MUSIC_CONTROL_CAPABILITY_ID || id === CALENDAR_MANAGEMENT_CAPABILITY_ID || id === LOCAL_DATA_LIBRARY_CAPABILITY_ID || id === TOOLBOX_MANAGEMENT_CAPABILITY_ID || id === USER_VIEW_READ_CAPABILITY_ID ? "auto" : "confirm";
     }
 
     function isAutoOnlyInternalCapability(id: string): boolean {
-        return id === NOTE_WALL_CAPABILITY_ID || id === MUSIC_CONTROL_CAPABILITY_ID || id === CALENDAR_MANAGEMENT_CAPABILITY_ID || id === LOCAL_DATA_LIBRARY_CAPABILITY_ID || id === TOOLBOX_MANAGEMENT_CAPABILITY_ID;
+        return id === NOTE_WALL_CAPABILITY_ID || id === MUSIC_CONTROL_CAPABILITY_ID || id === CALENDAR_MANAGEMENT_CAPABILITY_ID || id === LOCAL_DATA_LIBRARY_CAPABILITY_ID || id === TOOLBOX_MANAGEMENT_CAPABILITY_ID || id === USER_VIEW_READ_CAPABILITY_ID;
     }
 
     function getAutoOnlyCapabilityDetail(id: string): string {
@@ -279,10 +290,13 @@ export function ToolboxSettings() {
             return "日历管理开启后，角色可以通过工具查看当前角色的日程，并添加、修改或取消日程安排；相关操作会走工具箱能力，不再依赖旧的日程指令。";
         }
         if (id === LOCAL_DATA_LIBRARY_CAPABILITY_ID) {
-            return "本地资料库开启后，角色可以通过工具浏览虚拟资料目录，并读取或搜索本机小手机里的角色卡、聊天、朋友圈、记忆、工具箱、设置和应用数据。";
+            return "本地资料库开启后，角色可以读取非互动本地资料；聊天、通话和缓存必须使用独立的“查看小手机互动”权限，不能从这里旁路访问。";
         }
         if (id === TOOLBOX_MANAGEMENT_CAPABILITY_ID) {
             return "工具箱管理开启后，角色可以创建和维护它自己写入的 REST 工具、REST 套件、组合工具和组合工具套件；系统会拒绝修改用户手动创建或内置内容。";
+        }
+        if (id === USER_VIEW_READ_CAPABILITY_ID) {
+            return "这是玲玲授予 Eiren 的长期本人视角只读权限。它统一覆盖已登记的普通查询，但角色手机整体不在授权范围；每次仍记录实际 capability 和工具。关闭后，Eiren 交给 DeepSeek 的整组只读任务会立即失效。写入、删除、发送、命令执行、现实桥、权限和记忆写入始终需要各自的独立授权。";
         }
         return "这是内置工具能力，开启后角色可以在聊天中按需获取并调用对应工具。";
     }
@@ -1065,6 +1079,8 @@ export function ToolboxSettings() {
                     })}
                 </div>
             )}
+
+            <DeepSeekExecutionSettings />
 
             {/* Internal Capabilities */}
             <div className="flex justify-between items-center">

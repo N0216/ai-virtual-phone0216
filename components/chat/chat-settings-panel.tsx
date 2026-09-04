@@ -38,13 +38,14 @@ import { loadCharacters } from "@/lib/character-storage";
 import { isAgentComputerConfigured } from "@/lib/agent-computer";
 import { CharacterComputerPage } from "./character-computer-page";
 import { CharacterToolsPage, getRoleToolChatEnabledCount } from "./character-tools-page";
+import { CallHistoryPage } from "./call-history-page";
 import { resolveUserIdentity, loadBindingConfig, loadPresets, resolveBinding } from "@/lib/settings-storage";
 import { getStatusRegionConfig, saveStatusRegionConfig, presetSupportsStatusRegion, isCustomStatusRegionActive, STATUS_REGION_SCHEME_TARGET, STATUS_REGION_UPDATED_EVENT, type StatusRegionConfig } from "@/lib/chat-status-region";
 import { downloadFile } from "@/lib/download-utils";
 import { getSchemes, saveScheme, deleteScheme, type CSSScheme } from "@/lib/css-scheme-storage";
 import { CustomStatusFrame } from "@/components/chat/custom-status-frame";
 import { KeyboardAutoSendDebounceItem } from "@/components/chat/keyboard-auto-send-debounce-item";
-import { ChevronRight, Image as ImageIcon, Video, Mic, UserMinus, UserPlus, Users, Pin, MessageSquare, Search, AlertCircle, Code, Laptop, Trash2, Smile, Sparkles, X, Play, Upload, Download, Save, FolderOpen, Wrench, type LucideIcon } from "lucide-react";
+import { ChevronRight, Image as ImageIcon, Video, Mic, Phone, Languages, UserMinus, UserPlus, Users, Pin, MessageSquare, Search, AlertCircle, Code, Laptop, Trash2, Smile, Sparkles, X, Play, Upload, Download, Save, FolderOpen, Wrench, type LucideIcon } from "lucide-react";
 import { BINDING_ACCENTS, CONTENT_APP_ACCENTS } from "@/lib/ui-accent-colors";
 import CSSSchemeBar from "@/components/ui/css-scheme-picker";
 import { ConfirmDialog } from "@/components/ui/modal";
@@ -71,6 +72,13 @@ const STATUS_REGION_STARTER_CONTRACT = [
     "评论=<网友昵称>|<评论内容>|<点赞数>",
     "[/状态栏]",
 ].join("\n");
+
+const BUILTIN_CALL_LANGUAGES = new Set(["auto", "zh-CN", "zh-TW", "en", "ja", "ko", "fr", "de", "es", "ru"]);
+const BUILTIN_TRANSLATION_LANGUAGES = new Set(["none", "zh-CN", "zh-TW", "en", "ja", "ko", "fr", "de", "es", "ru"]);
+
+function customLanguageValue(value: string): string {
+    return value.startsWith("custom:") ? value.slice("custom:".length) : value;
+}
 
 const STATUS_REGION_STARTER_RENDER = `<style>
   :root{--bg:#fff;--text:#333;--sub:#93999f;--accent:#ff8200;--soft:#f6f7f9;--line:#f0f1f3}
@@ -396,6 +404,28 @@ export function ChatSettingsPanel({
     const [bilingualPromptDraft, setBilingualPromptDraft] = useState(session.bilingualTranslationPrompt || defaultBilingualPrompt);
     const [offlineBilingualTranslationPrompt, setOfflineBilingualTranslationPrompt] = useState(session.offlineBilingualTranslationPrompt || defaultOfflineBilingualPrompt);
     const [offlineBilingualPromptDraft, setOfflineBilingualPromptDraft] = useState(session.offlineBilingualTranslationPrompt || defaultOfflineBilingualPrompt);
+    const [voiceCallLanguage, setVoiceCallLanguage] = useState(session.voiceCallLanguage || "auto");
+    const [voiceCallTranslationLanguage, setVoiceCallTranslationLanguage] = useState(session.voiceCallTranslationLanguage ?? "zh-CN");
+    const [voiceCallAppearance, setVoiceCallAppearance] = useState(() => ({
+        visualStyle: session.voiceCallAppearance?.visualStyle || "noir" as "original" | "noir",
+        showLatinName: session.voiceCallAppearance?.showLatinName !== false,
+        latinName: session.voiceCallAppearance?.latinName || "",
+        captionFont: session.voiceCallAppearance?.captionFont || "serif" as "serif" | "system" | "rounded",
+        orbTone: session.voiceCallAppearance?.orbTone || "mist" as "mist" | "lilac" | "blue" | "rose",
+    }));
+    const [callRecordStyle, setCallRecordStyle] = useState<"original" | "wechat">(session.callRecordStyle || "original");
+    const [callRecordTemplates, setCallRecordTemplates] = useState(() => ({
+        ended: session.callRecordTemplates?.ended || "通话时长 {时长}",
+        cancelled: session.callRecordTemplates?.cancelled || "已取消",
+        rejected: session.callRecordTemplates?.rejected || "已拒绝",
+        missed: session.callRecordTemplates?.missed || "未接听",
+    }));
+    const [callRecordAppearance, setCallRecordAppearance] = useState(() => ({
+        voiceIcon: session.callRecordAppearance?.voiceIcon ?? "☎︎",
+        videoIcon: session.callRecordAppearance?.videoIcon ?? "▣",
+        voiceLabel: session.callRecordAppearance?.voiceLabel ?? "语音通话",
+        videoLabel: session.callRecordAppearance?.videoLabel ?? "视频通话",
+    }));
     const [customCSS, setCustomCSS] = useState(() => {
         // Read latest CSS from storage (in case 小卷 updated it)
         const sessions = loadChatSessions();
@@ -415,6 +445,7 @@ export function ChatSettingsPanel({
     // TA 的电脑：翻看角色云端电脑（连接了角色电脑才显示入口）
     const [showComputer, setShowComputer] = useState(false);
     const [showCharacterTools, setShowCharacterTools] = useState(false);
+    const [showCallHistory, setShowCallHistory] = useState(false);
     const [roleToolCount, setRoleToolCount] = useState(() => session.isGroup ? 0 : getRoleToolChatEnabledCount(session.contactId));
     const [searchQuery, setSearchQuery] = useState("");
     const [submittedSearchQuery, setSubmittedSearchQuery] = useState("");
@@ -832,6 +863,16 @@ export function ChatSettingsPanel({
                         <div className="menu-right"><ChevronRight size={16} /></div>
                     </button>
                     {!session.isGroup && (
+                        <button className="menu-item" onClick={() => setShowCallHistory(true)}>
+                            <ChatInfoIcon icon={Phone} color={BINDING_ACCENTS.voice} />
+                            <div className="menu-label-group">
+                                <span className="menu-label">通话内容</span>
+                                <span className="menu-desc">独立查看语音与视频通话文字，不塞进聊天记录</span>
+                            </div>
+                            <div className="menu-right"><ChevronRight size={16} /></div>
+                        </button>
+                    )}
+                    {!session.isGroup && (
                         <button className="menu-item" onClick={() => setShowCharacterTools(true)}>
                             <ChatInfoIcon icon={Wrench} color={BINDING_ACCENTS.api} />
                             <div className="menu-label-group">
@@ -1172,6 +1213,309 @@ export function ChatSettingsPanel({
                         </div>
                         <input type="file" accept="image/*" onChange={e => handleImageUpload(e, setVoiceBackground, "voiceBackground")} className="hidden" />
                     </label>
+                    {!session.isGroup && (
+                        <>
+                            <div className="px-4 py-3 space-y-3 border-t border-[var(--c-card-border)]/50">
+                                <div>
+                                    <div className="ts-13 font-medium text-[var(--c-text-title)]">这个角色的通话画面</div>
+                                    <div className="ts-11 text-[var(--c-text)] mt-1">只影响当前角色；原版和雾核版随时切换，聊天全局 CSS 仍可叠加。</div>
+                                </div>
+                                <label className="grid grid-cols-[72px_1fr] items-center gap-2">
+                                    <span className="ts-11 text-[var(--c-text)]">画面版本</span>
+                                    <select
+                                        className="ui-input h-9 rounded-xl px-3 ts-12"
+                                        value={voiceCallAppearance.visualStyle}
+                                        onChange={event => {
+                                            const next = { ...voiceCallAppearance, visualStyle: event.target.value === "original" ? "original" as const : "noir" as const };
+                                            setVoiceCallAppearance(next);
+                                            updateSession({ voiceCallAppearance: next });
+                                        }}
+                                    >
+                                        <option value="noir">雾核声场</option>
+                                        <option value="original">原版电话</option>
+                                    </select>
+                                </label>
+                                {voiceCallAppearance.visualStyle === "noir" && (
+                                    <>
+                                        <label className="grid grid-cols-[72px_1fr] items-center gap-2">
+                                            <span className="ts-11 text-[var(--c-text)]">字幕字体</span>
+                                            <select
+                                                className="ui-input h-9 rounded-xl px-3 ts-12"
+                                                value={voiceCallAppearance.captionFont}
+                                                onChange={event => {
+                                                    const value = event.target.value as "serif" | "system" | "rounded";
+                                                    const next = { ...voiceCallAppearance, captionFont: value };
+                                                    setVoiceCallAppearance(next);
+                                                    updateSession({ voiceCallAppearance: next });
+                                                }}
+                                            >
+                                                <option value="serif">轻衬线</option>
+                                                <option value="system">系统清透</option>
+                                                <option value="rounded">柔和圆体</option>
+                                            </select>
+                                        </label>
+                                        <label className="grid grid-cols-[72px_1fr] items-center gap-2">
+                                            <span className="ts-11 text-[var(--c-text)]">呼吸雾色</span>
+                                            <select
+                                                className="ui-input h-9 rounded-xl px-3 ts-12"
+                                                value={voiceCallAppearance.orbTone}
+                                                onChange={event => {
+                                                    const value = event.target.value as "mist" | "lilac" | "blue" | "rose";
+                                                    const next = { ...voiceCallAppearance, orbTone: value };
+                                                    setVoiceCallAppearance(next);
+                                                    updateSession({ voiceCallAppearance: next });
+                                                }}
+                                            >
+                                                <option value="mist">原版雾蓝紫</option>
+                                                <option value="lilac">低饱和淡紫</option>
+                                                <option value="blue">冷雾蓝</option>
+                                                <option value="rose">灰雾粉</option>
+                                            </select>
+                                        </label>
+                                        <label className="flex items-center justify-between gap-3">
+                                            <span>
+                                                <span className="block ts-12 text-[var(--c-text-title)]">英文排版名</span>
+                                                <span className="block ts-10 text-[var(--c-text)] mt-0.5">英文名保持原样；中文名自动转成拼音，也可在下面覆盖。</span>
+                                            </span>
+                                            <input
+                                                type="checkbox"
+                                                checked={voiceCallAppearance.showLatinName}
+                                                onChange={event => {
+                                                    const next = { ...voiceCallAppearance, showLatinName: event.target.checked };
+                                                    setVoiceCallAppearance(next);
+                                                    updateSession({ voiceCallAppearance: next });
+                                                }}
+                                            />
+                                        </label>
+                                        {voiceCallAppearance.showLatinName && (
+                                            <label className="grid grid-cols-[72px_1fr] items-center gap-2">
+                                                <span className="ts-11 text-[var(--c-text)]">自定英文名</span>
+                                                <input
+                                                    className="ui-input h-9 rounded-xl px-3 ts-12"
+                                                    value={voiceCallAppearance.latinName}
+                                                    placeholder="留空则自动处理"
+                                                    onChange={event => {
+                                                        const next = { ...voiceCallAppearance, latinName: event.target.value };
+                                                        setVoiceCallAppearance(next);
+                                                        updateSession({ voiceCallAppearance: next });
+                                                    }}
+                                                />
+                                            </label>
+                                        )}
+                                    </>
+                                )}
+                            </div>
+                            <div className="menu-item">
+                                <ChatInfoIcon icon={Languages} color={BINDING_ACCENTS.voice} />
+                                <div className="menu-label-group">
+                                    <span className="menu-label">通话语言</span>
+                                    <span className="menu-desc">默认自动跟随你本轮说话的语言</span>
+                                </div>
+                                <div className="menu-right">
+                                    <select
+                                        className="ui-input h-9 max-w-[132px] rounded-xl px-2 text-right"
+                                        value={BUILTIN_CALL_LANGUAGES.has(voiceCallLanguage) ? voiceCallLanguage : "__custom__"}
+                                        onChange={event => {
+                                            const value = event.target.value === "__custom__" ? "custom:" : event.target.value;
+                                            setVoiceCallLanguage(value);
+                                            updateSession({ voiceCallLanguage: value });
+                                        }}
+                                    >
+                                        <option value="auto">自动跟随</option>
+                                        <option value="zh-CN">简体中文</option>
+                                        <option value="zh-TW">繁体中文</option>
+                                        <option value="en">English</option>
+                                        <option value="ja">日本語</option>
+                                        <option value="ko">한국어</option>
+                                        <option value="fr">Français</option>
+                                        <option value="de">Deutsch</option>
+                                        <option value="es">Español</option>
+                                        <option value="ru">Русский</option>
+                                        <option value="__custom__">自定义语言…</option>
+                                    </select>
+                                </div>
+                            </div>
+                            {!BUILTIN_CALL_LANGUAGES.has(voiceCallLanguage) && (
+                                <div className="menu-item">
+                                    <div className="menu-label-group">
+                                        <span className="menu-label">自定义通话语言</span>
+                                        <span className="menu-desc">填写语言代码，如 it-IT、pt-BR、th-TH</span>
+                                    </div>
+                                    <div className="menu-right">
+                                        <input
+                                            className="ui-input h-9 max-w-[150px] rounded-xl px-3 text-right"
+                                            value={customLanguageValue(voiceCallLanguage)}
+                                            placeholder="例如 it-IT"
+                                            onChange={event => {
+                                                const value = `custom:${event.target.value.trim()}`;
+                                                setVoiceCallLanguage(value);
+                                                updateSession({ voiceCallLanguage: value });
+                                            }}
+                                        />
+                                    </div>
+                                </div>
+                            )}
+                            <div className="menu-item">
+                                <ChatInfoIcon icon={Languages} color={BINDING_ACCENTS.memory} />
+                                <div className="menu-label-group">
+                                    <span className="menu-label">实时字幕翻译</span>
+                                    <span className="menu-desc">原文和译文同步渐显；也可以关闭译文</span>
+                                </div>
+                                <div className="menu-right">
+                                    <select
+                                        className="ui-input h-9 max-w-[132px] rounded-xl px-2 text-right"
+                                        value={BUILTIN_TRANSLATION_LANGUAGES.has(voiceCallTranslationLanguage) ? voiceCallTranslationLanguage : "__custom__"}
+                                        onChange={event => {
+                                            const value = event.target.value === "__custom__" ? "custom:" : event.target.value;
+                                            setVoiceCallTranslationLanguage(value);
+                                            updateSession({ voiceCallTranslationLanguage: value });
+                                        }}
+                                    >
+                                        <option value="none">不显示译文</option>
+                                        <option value="zh-CN">简体中文</option>
+                                        <option value="zh-TW">繁体中文</option>
+                                        <option value="en">English</option>
+                                        <option value="ja">日本語</option>
+                                        <option value="ko">한국어</option>
+                                        <option value="fr">Français</option>
+                                        <option value="de">Deutsch</option>
+                                        <option value="es">Español</option>
+                                        <option value="ru">Русский</option>
+                                        <option value="__custom__">自定义语言…</option>
+                                    </select>
+                                </div>
+                            </div>
+                            {!BUILTIN_TRANSLATION_LANGUAGES.has(voiceCallTranslationLanguage) && (
+                                <div className="menu-item">
+                                    <div className="menu-label-group">
+                                        <span className="menu-label">自定义翻译语言</span>
+                                        <span className="menu-desc">可填语言名称或代码，如 Italiano、it</span>
+                                    </div>
+                                    <div className="menu-right">
+                                        <input
+                                            className="ui-input h-9 max-w-[150px] rounded-xl px-3 text-right"
+                                            value={customLanguageValue(voiceCallTranslationLanguage)}
+                                            placeholder="例如 Italiano"
+                                            onChange={event => {
+                                                const value = `custom:${event.target.value.trim()}`;
+                                                setVoiceCallTranslationLanguage(value);
+                                                updateSession({ voiceCallTranslationLanguage: value });
+                                            }}
+                                        />
+                                    </div>
+                                </div>
+                            )}
+                            <div className="menu-item">
+                                <ChatInfoIcon icon={MessageSquare} color={BINDING_ACCENTS.voice} />
+                                <div className="menu-label-group">
+                                    <span className="menu-label">通话记录显示</span>
+                                    <span className="menu-desc">挂断后沿用当前聊天气泡，显示在发起方一侧</span>
+                                </div>
+                                <div className="menu-right">
+                                    <select
+                                        className="ui-input h-9 max-w-[132px] rounded-xl px-2 text-right"
+                                        value={callRecordStyle}
+                                        onChange={event => {
+                                            const value = event.target.value === "wechat" ? "wechat" : "original";
+                                            setCallRecordStyle(value);
+                                            updateSession({ callRecordStyle: value });
+                                        }}
+                                    >
+                                        <option value="original">原版摘要</option>
+                                        <option value="wechat">挂断气泡</option>
+                                    </select>
+                                </div>
+                            </div>
+                            {callRecordStyle === "wechat" && (
+                                <div className="px-4 pb-4 pt-2 space-y-3 border-t border-[var(--c-card-border)]/50">
+                                    <div className="flex items-center justify-between gap-3">
+                                        <div>
+                                            <div className="ts-13 font-medium text-[var(--c-text-title)]">挂断气泡装饰与文案</div>
+                                            <div className="ts-11 text-[var(--c-text)] mt-1">气泡外观继承当前聊天 CSS；只有 {'{时长}'} 会自动替换为真实数据。</div>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            className="ui-btn ui-btn-ghost ts-11 px-3"
+                                            onClick={() => {
+                                                const defaults = {
+                                                    ended: "通话时长 {时长}",
+                                                    cancelled: "已取消",
+                                                    rejected: "已拒绝",
+                                                    missed: "未接听",
+                                                };
+                                                const appearanceDefaults = {
+                                                    voiceIcon: "☎︎",
+                                                    videoIcon: "▣",
+                                                    voiceLabel: "语音通话",
+                                                    videoLabel: "视频通话",
+                                                };
+                                                setCallRecordTemplates(defaults);
+                                                setCallRecordAppearance(appearanceDefaults);
+                                                updateSession({ callRecordTemplates: defaults, callRecordAppearance: appearanceDefaults });
+                                            }}
+                                        >恢复默认</button>
+                                    </div>
+                                    <div className="grid grid-cols-1 gap-2">
+                                        {(["voice", "video"] as const).map(kind => (
+                                            <div key={kind} className="rounded-xl border border-[var(--c-card-border)]/60 p-2.5 space-y-2">
+                                                <div className="ts-11 text-[var(--c-text)]">{kind === "voice" ? "语音通话" : "视频通话"}</div>
+                                                <label className="grid grid-cols-[42px_1fr] items-center gap-2">
+                                                    <span className="ts-11 text-[var(--c-text)]">装饰</span>
+                                                    <input
+                                                        className="ui-input h-9 rounded-xl px-3 ts-12"
+                                                        value={kind === "voice" ? callRecordAppearance.voiceIcon : callRecordAppearance.videoIcon}
+                                                        placeholder={kind === "voice" ? "☎︎ / ♡ / 颜文字" : "▣ / ✦ / 颜文字"}
+                                                        onChange={event => {
+                                                            const key = kind === "voice" ? "voiceIcon" : "videoIcon";
+                                                            const next = { ...callRecordAppearance, [key]: event.target.value };
+                                                            setCallRecordAppearance(next);
+                                                            updateSession({ callRecordAppearance: next });
+                                                        }}
+                                                    />
+                                                </label>
+                                                <label className="grid grid-cols-[42px_1fr] items-center gap-2">
+                                                    <span className="ts-11 text-[var(--c-text)]">标题</span>
+                                                    <input
+                                                        className="ui-input h-9 rounded-xl px-3 ts-12"
+                                                        value={kind === "voice" ? callRecordAppearance.voiceLabel : callRecordAppearance.videoLabel}
+                                                        onChange={event => {
+                                                            const key = kind === "voice" ? "voiceLabel" : "videoLabel";
+                                                            const next = { ...callRecordAppearance, [key]: event.target.value };
+                                                            setCallRecordAppearance(next);
+                                                            updateSession({ callRecordAppearance: next });
+                                                        }}
+                                                    />
+                                                </label>
+                                            </div>
+                                        ))}
+                                    </div>
+                                    {([
+                                        ["ended", "已接通", "例如：通话时长 {时长}、陪了你 {时长}"],
+                                        ["cancelled", "已取消", "例如：这次先溜走啦 ૮₍˶ᵔ ᵕ ᵔ˶₎ა"],
+                                        ["rejected", "已拒绝", "例如：现在不方便接听"],
+                                        ["missed", "未接听", "例如：刚才没有接到你"],
+                                    ] as const).map(([key, label, placeholder]) => (
+                                        <label key={key} className="grid grid-cols-[56px_1fr] items-start gap-2">
+                                            <span className="ts-11 text-[var(--c-text)]">{label}</span>
+                                            <span className="space-y-1">
+                                                <input
+                                                    className="ui-input h-9 w-full rounded-xl px-3 ts-12"
+                                                    value={callRecordTemplates[key]}
+                                                    placeholder={placeholder}
+                                                    onChange={event => {
+                                                        const next = { ...callRecordTemplates, [key]: event.target.value };
+                                                        setCallRecordTemplates(next);
+                                                        updateSession({ callRecordTemplates: next });
+                                                    }}
+                                                />
+                                                {key === "ended" && <span className="block ts-10 text-[var(--c-text)]">{'{时长}'} 表示系统自动计算的真实通话时长；即使删掉占位符，真实时长也会自动补在文案后面。</span>}
+                                            </span>
+                                        </label>
+                                    ))}
+                                </div>
+                            )}
+                        </>
+                    )}
                 </div>
 
                 {/* Advanced */}
@@ -1512,6 +1856,14 @@ export function ChatSettingsPanel({
                     characterName={characterName}
                     onClose={() => setShowCharacterTools(false)}
                     onCountChange={setRoleToolCount}
+                />
+            )}
+
+            {showCallHistory && !session.isGroup && (
+                <CallHistoryPage
+                    session={session}
+                    characterName={characterName}
+                    onClose={() => setShowCallHistory(false)}
                 />
             )}
 

@@ -7,6 +7,7 @@ import {
   Code2,
   Download,
   LayoutGrid,
+  Sparkles,
   PaintBucket,
   Plus,
   RotateCcw,
@@ -25,6 +26,7 @@ import { CUSTOM_APPS_UPDATED_EVENT, loadInstalledCustomApps } from "@/lib/custom
 import { toCustomAppIconId, type InstalledCustomApp } from "@/lib/custom-app-types";
 import { PageShell } from "@/components/ui/page-shell";
 import { readPwaDisplayPreference, writePwaDisplayPreference } from "@/lib/pwa-display-mode";
+import { preparePwaAppIcon, readPwaAppIconSetting, savePwaAppIconSetting } from "@/lib/pwa-app-icon";
 import {
   GRID_COLS,
   GRID_ROWS,
@@ -53,6 +55,7 @@ import { BINDING_ACCENTS } from "@/lib/ui-accent-colors";
 import { ConfirmDialog, ContentDialog } from "@/components/ui/modal";
 import type { DIYWidgetTemplate } from "@/lib/widget-types";
 import { DIYWidgetEditor } from "@/components/widgets/diy-widget-editor";
+import { EntryExperienceSettingsPage } from "@/components/entry-experience-settings";
 import {
   createThemePackageBlob,
   installThemePackageFile,
@@ -65,6 +68,7 @@ type ThemeSection =
   | "wallpaper"
   | "icons"
   | "widgets"
+  | "entry"
   | "case"
   | "text"
   | "css";
@@ -115,6 +119,10 @@ function IconWidgets() {
   return <AppWindow size={22} strokeWidth={1.75} />;
 }
 
+function IconEntry() {
+  return <Sparkles size={22} strokeWidth={1.75} />;
+}
+
 function IconCase() {
   return <Smartphone size={22} strokeWidth={1.75} />;
 }
@@ -149,6 +157,7 @@ const MENU_ITEMS: Array<{
   { section: "wallpaper", icon: IconWallpaper, label: "壁纸", desc: "桌面背景", color: BINDING_ACCENTS.api, glow: `color-mix(in srgb, ${BINDING_ACCENTS.api} 35%, transparent)`, glass: "wallpaper" },
   { section: "icons", icon: IconGrid, label: "图标", desc: "应用图标", color: BINDING_ACCENTS.regex, glow: `color-mix(in srgb, ${BINDING_ACCENTS.regex} 35%, transparent)`, glass: "icons" },
   { section: "widgets", icon: IconWidgets, label: "桌面组件", desc: "小组件", color: BINDING_ACCENTS.voice, glow: `color-mix(in srgb, ${BINDING_ACCENTS.voice} 35%, transparent)`, glass: "widgets" },
+  { section: "entry", icon: IconEntry, label: "开屏动画", desc: "保留原版，也可切换或导入自己的动画", color: BINDING_ACCENTS.memory, glow: `color-mix(in srgb, ${BINDING_ACCENTS.memory} 35%, transparent)`, glass: "status-bar" },
   { section: "case", icon: IconCase, label: "状态栏", color: BINDING_ACCENTS.memory, glass: "status-bar" },
   { section: "text", icon: IconText, label: "文字", color: BINDING_ACCENTS.identity, glow: `color-mix(in srgb, ${BINDING_ACCENTS.identity} 35%, transparent)`, glass: "text" },
   { section: "css", icon: IconCode, label: "CSS 变量", desc: "自定义全局样式变量", color: BINDING_ACCENTS.embedding, glow: `color-mix(in srgb, ${BINDING_ACCENTS.embedding} 35%, transparent)`, glass: "css" },
@@ -165,12 +174,13 @@ const SECTION_TITLES: Record<Exclude<ThemeSection, "menu">, string> = {
   wallpaper: "\u58C1\u7EB8",
   icons: "\u56FE\u6807",
   widgets: "\u684C\u9762\u7EC4\u4EF6",
+  entry: "开屏动画",
   case: "\u624B\u673A\u58F3",
   text: "\u6587\u5B57",
   css: "CSS \u53D8\u91CF",
 };
 
-const THEME_SECTIONS = new Set<string>(["menu", "palette", "wallpaper", "icons", "widgets", "case", "text", "css"]);
+const THEME_SECTIONS = new Set<string>(["menu", "palette", "wallpaper", "icons", "widgets", "entry", "case", "text", "css"]);
 
 function isThemeSection(value: string): value is ThemeSection {
   return THEME_SECTIONS.has(value);
@@ -346,12 +356,12 @@ export function PhoneThemeApp({
                     </div>
                   );
                 })()}
-                {MENU_ITEMS.filter(item => ["text"].includes(item.section)).map((item) => (
+                {MENU_ITEMS.filter(item => ["entry", "text"].includes(item.section)).map((item) => (
                   <button
                     key={item.section}
                     className="menu-item"
                     type="button"
-                    onClick={() => setShowTextAdjust(true)}
+                    onClick={() => item.section === "entry" ? setSection("entry") : setShowTextAdjust(true)}
                   >
                     <span className="card-icon card-icon-glass">
                       <GlassIcon name={item.glass} />
@@ -434,6 +444,8 @@ export function PhoneThemeApp({
             iconSkins={iconSkins}
             wallpaperStyle={wallpaperStyle}
           />
+        ) : section === "entry" ? (
+          <EntryExperienceSettingsPage onNotice={onNotice} />
         ) : section === "palette" ? (
           <PalettePresetPage draft={draft} onDraftChange={onDraftChange} onApply={onApply} onNotice={onNotice} />
         ) : section === "css" ? (
@@ -823,6 +835,21 @@ function TextScalePage({
     onDraftChange(next);
     onApply(next);
   };
+  const fontPresets = [
+    { label: "系统默认", value: DEFAULT_THEME_PROFILE.fontFamily, preview: "小手机 Aa" },
+    { label: "清爽黑体", value: '"Inter", "PingFang SC", sans-serif', preview: "小手机 Aa" },
+    { label: "柔和圆体", value: '"Game Hall Zen Maru Gothic", "PingFang SC", sans-serif', preview: "小手机 Aa" },
+    { label: "雅致宋体", value: '"Noto Serif SC", "Songti SC", serif', preview: "小手机 Aa" },
+    { label: "手写感", value: '"Long Cang", "Kaiti SC", cursive', preview: "小手机 Aa" },
+    { label: "复古打字", value: '"Special Elite", "PingFang SC", serif', preview: "小手机 Aa" },
+  ];
+  const applyFontPreset = async (fontFamily: string) => {
+    const { "--app-font-family": _fontOverride, ...cssOverrides } = draft.cssOverrides;
+    const next = normalizeThemeProfile({ ...draft, fontAssetId: null, fontFamily, cssOverrides });
+    onDraftChange(next);
+    await onApply(next);
+    onNotice("已切换全局字体");
+  };
   const handleFontClear = useCallback(async () => {
     const assetId = draft.fontAssetId;
     const { "--app-font-family": _fontOverride, ...cssOverrides } = draft.cssOverrides;
@@ -886,6 +913,22 @@ function TextScalePage({
       {/* 字体选择 */}
       <div className="mt-4">
         <p className="ts-13 font-medium mb-8" style={{ color: "var(--c-text-title)" }}>{"字体"}</p>
+        <div className="grid grid-cols-2 gap-2 mb-4">
+          {fontPresets.map(preset => {
+            const active = !draft.fontAssetId && draft.fontFamily === preset.value;
+            return (
+              <button
+                type="button"
+                key={preset.label}
+                onClick={() => void applyFontPreset(preset.value)}
+                className={`rounded-2xl border px-3 py-3 text-left transition-all ${active ? "border-black/45 bg-black/[0.06] shadow-sm" : "border-black/10 bg-white/55"}`}
+              >
+                <span className="block ts-11 text-[var(--c-text)]">{preset.label}</span>
+                <span className="block ts-16 mt-2 text-[var(--c-text-title)]" style={{ fontFamily: preset.value }}>{preset.preview}</span>
+              </button>
+            );
+          })}
+        </div>
         {draft.fontAssetId && (
           <div className="mb-2 flex justify-end">
             <button
@@ -906,13 +949,13 @@ function TextScalePage({
             onClick={() => fontFileRef.current?.click()}
           >
             <Type size={15} strokeWidth={1.8} />
-            <span>上传字体</span>
+            <span>{draft.fontAssetId ? "更换自定义字体" : "上传自定义字体"}</span>
           </button>
         </div>
         <input
           ref={fontFileRef}
           type="file"
-          accept=".ttf,.otf,.woff,.woff2"
+          accept=".ttf,.otf,.woff,.woff2,font/*,application/font-woff,application/font-woff2"
           className="hidden"
           onChange={handleFontUpload}
         />
@@ -921,7 +964,7 @@ function TextScalePage({
       <p className="ts-11 text-[var(--c-icon)] leading-relaxed mt-12">
         {"文字缩放：以当前设计字号为 100%，范围 75% ~ 150%。"}
         <br />
-        {"字体：上传 .ttf / .otf / .woff2 文件。"}
+        {"字体：可选择内置预设，也可上传 .ttf / .otf / .woff / .woff2 文件；聊天仍可用单独 CSS 覆盖。"}
       </p>
     </div>
   );
@@ -1017,6 +1060,8 @@ function IconSkinPage({
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const dockFileRef = useRef<HTMLInputElement>(null);
+  const pwaIconFileRef = useRef<HTMLInputElement>(null);
+  const [pwaIcon, setPwaIcon] = useState<{ mode: "original" | "custom"; dataUrl?: string }>({ mode: "original" });
   const [thumbs, setThumbs] = useState<Record<string, string>>({});
   const [dockThumbUrl, setDockThumbUrl] = useState<string | null>(null);
   const [uploadTarget, setUploadTarget] = useState<DesktopIconId | null>(null);
@@ -1025,6 +1070,30 @@ function IconSkinPage({
   const [customApps, setCustomApps] = useState<InstalledCustomApp[]>(() => (
     typeof window === "undefined" ? [] : loadInstalledCustomApps()
   ));
+
+  useEffect(() => setPwaIcon(readPwaAppIconSetting()), []);
+
+  const handlePwaIconUpload = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    try {
+      const dataUrl = await preparePwaAppIcon(file);
+      const next = { mode: "custom" as const, dataUrl };
+      savePwaAppIconSetting(next);
+      setPwaIcon(next);
+      onNotice("桌面 App 图标已更新；请删除旧桌面图标，再从 Safari 重新添加到主屏幕");
+    } catch (error) {
+      onNotice(`图标处理失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [onNotice]);
+
+  const restorePwaIcon = useCallback(() => {
+    const next = { mode: "original" as const };
+    savePwaAppIconSetting(next);
+    setPwaIcon(next);
+    onNotice("已恢复原版桌面图标；重新添加到主屏幕后生效");
+  }, [onNotice]);
 
   const activeSkins = resolveActiveIconSkins(draft);
   const allAssetIds = Object.values(activeSkins).filter(Boolean) as string[];
@@ -1169,6 +1238,22 @@ function IconSkinPage({
 
   return (
     <div className="theme-section-page" data-bottom-reserve style={{ gap: 14 }}>
+      <h3 className="appearance-menu-section-title">桌面 App 图标</h3>
+      <div className="rounded-2xl border border-black/10 bg-white/55 p-4 flex items-center gap-4">
+        <div className="w-16 h-16 rounded-[15px] overflow-hidden bg-white shadow-sm border border-black/5 shrink-0">
+          <img src={pwaIcon.mode === "custom" && pwaIcon.dataUrl ? pwaIcon.dataUrl : "/icon-192.png"} alt="桌面 App 图标预览" className="w-full h-full object-cover" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="ts-13 font-medium text-[var(--c-text-title)]">{pwaIcon.mode === "custom" ? "自定义图标" : "原版 Float 图标"}</div>
+          <div className="ts-10 leading-relaxed text-[var(--c-text)] mt-1">iOS 已添加过的图标不会自动刷新，修改后需删除旧图标，再用 Safari 重新“添加到主屏幕”。</div>
+          <div className="flex gap-2 mt-3">
+            <button type="button" className="ui-btn ui-btn-soft-action ts-11 flex-1" onClick={() => pwaIconFileRef.current?.click()}>选择图片</button>
+            <button type="button" className="ui-btn ui-btn-outline ts-11 flex-1" onClick={restorePwaIcon}>恢复原版</button>
+          </div>
+        </div>
+      </div>
+      <input ref={pwaIconFileRef} type="file" accept="image/*" className="hidden" onChange={handlePwaIconUpload} />
+
       <h3 className="appearance-menu-section-title">Icons</h3>
       <div className="is-grid">
         {iconSkinItems.map(item => {

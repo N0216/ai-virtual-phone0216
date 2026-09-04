@@ -58,6 +58,7 @@ import {
     type MenstrualPeriodCareEvent,
 } from "./menstrual-storage";
 import { canStartAutoWakeModelCall, usageCategoryForChatRequest } from "./model-usage";
+import { recordAutoWakeLog } from "./auto-wake-log";
 
 // ── Constants ──────────────────────────────────────────────
 const MAX_FOLLOW_UPS = 10;
@@ -513,6 +514,14 @@ async function fireFollowUp(sched: { sessionId: string; count: number; delaySec?
 
         const { hasVisible, newCount, stateValues } = await saveBackgroundCompletionRounds(rounds, session.id, sched.count, count, latestMessages);
         console.log(`[FollowUp] Result: hasVisible=${hasVisible}, newCount=${newCount}`);
+        recordAutoWakeLog({
+            characterName: resolveFollowUpSenderName(session.id),
+            trigger: "未回复后的主动追问",
+            decision: hasVisible ? "sent" : "silent",
+            detail: hasVisible
+                ? "角色发现你还没有回复，决定继续主动说话；消息已进入聊天。"
+                : "角色检查了最近的聊天，决定先不打扰你；没有发送消息。",
+        });
 
         // 本地已完成这一轮，撤销服务端对应的兜底预约（只撤本轮的精确键，
         // 不用前缀删，避免误删 scheduleFollowUp 马上要挂的下一轮）
@@ -527,6 +536,12 @@ async function fireFollowUp(sched: { sessionId: string; count: number; delaySec?
 
     } catch (error: any) {
         console.error(`[FollowUp] Error:`, error);
+        recordAutoWakeLog({
+            characterName: resolveFollowUpSenderName(sched.sessionId),
+            trigger: "未回复后的主动追问",
+            decision: "failed",
+            detail: `本次生成失败：${error?.message || String(error)}`,
+        });
         pushChatMessage({
             sessionId: sched.sessionId,
             role: "system",
@@ -628,6 +643,15 @@ async function fireIdleReconnect(rule: IdleReconnectRule, lastUserAt: number) {
         // 额外预留角色卡、世界书、长期记忆与工具说明的系统提示开销，宁可早停也不低估。
         const estimatedTokens = 2_000 + Math.max(1, Math.ceil((promptChars + outputChars) / 3));
         markIdleReconnectChecked(rule.id, Date.now(), hasVisible, estimatedTokens);
+        recordAutoWakeLog({
+            characterName: resolveFollowUpSenderName(session.id),
+            trigger: "长时间没聊天后主动联系",
+            model: rule.wakeApiConfigId,
+            decision: hasVisible ? "sent" : "silent",
+            detail: hasVisible
+                ? `已经有约 ${elapsedMinutes} 分钟没有聊天，角色决定主动联系你；消息已进入聊天。`
+                : `已经有约 ${elapsedMinutes} 分钟没有聊天，角色看过近况后选择不打扰。`,
+        });
         if (hasVisible) scheduleFollowUp(session.id, 0, stateValues);
         window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: session.id } }));
 
@@ -636,6 +660,13 @@ async function fireIdleReconnect(rule: IdleReconnectRule, lastUserAt: number) {
         if (refreshed) void armIdleReconnectBailout(refreshed);
     } catch (error: unknown) {
         console.error("[IdleReconnect] Error:", error);
+        recordAutoWakeLog({
+            characterName: resolveFollowUpSenderName(rule.sessionId),
+            trigger: "长时间没聊天后主动联系",
+            model: rule.wakeApiConfigId,
+            decision: "failed",
+            detail: `本次检查失败：${error instanceof Error ? error.message : String(error)}`,
+        });
         markIdleReconnectChecked(rule.id, Date.now(), false, 0);
         window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: rule.sessionId } }));
     } finally {
@@ -688,6 +719,14 @@ async function fireTimedWake(sched: TimedWakeSchedule) {
             latestMessages,
         );
         console.log(`[TimedWake] Result: hasVisible=${hasVisible}`);
+        recordAutoWakeLog({
+            characterName: resolveFollowUpSenderName(session.id),
+            trigger: sched.source === "user" ? "你设置的定时主动消息" : "角色约好稍后联系",
+            decision: hasVisible ? "sent" : "silent",
+            detail: hasVisible
+                ? "到达约定时间后，角色决定发消息；消息已进入聊天。"
+                : "到达约定时间后，角色重新看过聊天并选择静默。",
+        });
 
         if (hasVisible) {
             scheduleFollowUp(session.id, 0, stateValues);
@@ -697,6 +736,12 @@ async function fireTimedWake(sched: TimedWakeSchedule) {
     } catch (error: any) {
         console.error("[TimedWake] Error:", error);
         const failureLabel = sched.source === "user" ? "定时主动消息" : "稍后主动联系";
+        recordAutoWakeLog({
+            characterName: resolveFollowUpSenderName(sched.sessionId),
+            trigger: sched.source === "user" ? "你设置的定时主动消息" : "角色约好稍后联系",
+            decision: "failed",
+            detail: `本次生成失败：${error?.message || String(error)}`,
+        });
         pushChatMessage({
             sessionId: sched.sessionId,
             role: "system",
@@ -758,6 +803,14 @@ async function fireMenstrualPeriodCare(input: {
         });
         cancelBailoutKey(`periodcare:${input.characterId}:${input.event.cycleKey}`);
         console.log(`[PeriodCare] Result: hasVisible=${hasVisible}`);
+        recordAutoWakeLog({
+            characterName: resolveFollowUpSenderName(session.id),
+            trigger: "经期关怀",
+            decision: hasVisible ? "sent" : "silent",
+            detail: hasVisible
+                ? "角色根据经期记录决定主动关心你；消息已进入聊天。"
+                : "角色查看了经期记录，但这次选择不主动发消息。",
+        });
 
         if (hasVisible) {
             scheduleFollowUp(session.id, 0, stateValues);
@@ -766,6 +819,12 @@ async function fireMenstrualPeriodCare(input: {
         window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: session.id } }));
     } catch (error: any) {
         console.error("[PeriodCare] Error:", error);
+        recordAutoWakeLog({
+            characterName: resolveFollowUpSenderName(input.sessionId),
+            trigger: "经期关怀",
+            decision: "failed",
+            detail: `本次生成失败：${error?.message || String(error)}`,
+        });
         pushChatMessage({
             sessionId: input.sessionId,
             role: "system",

@@ -635,6 +635,22 @@ export function saveVoiceConfigs(configs: VoiceApiConfig[]): void {
 
 export const DEFAULT_IMAGE_GENERATION_SETTINGS: ImageGenerationSettings = {
     enabled: false,
+    providers: [{
+        id: "image-provider-default",
+        name: "原版配置",
+        requestMode: "direct",
+        apiKey: "",
+        baseUrl: "https://api.openai.com/v1",
+        model: "gpt-image-2",
+        models: ["gpt-image-2"],
+        size: "1024x1024",
+        quality: "auto",
+        extraPrompt: "",
+        createdAt: 0,
+        updatedAt: 0,
+    }],
+    activeProviderId: "image-provider-default",
+    characterProviderBindings: {},
     requestMode: "direct",
     apiKey: "",
     baseUrl: "https://api.openai.com/v1",
@@ -653,6 +669,32 @@ export const DEFAULT_IMAGE_GENERATION_SETTINGS: ImageGenerationSettings = {
     },
 };
 
+type ImageProvider = ImageGenerationSettings["providers"][number];
+
+function normalizeImageProvider(value: Partial<ImageProvider> | null | undefined, index: number): ImageProvider {
+    const now = Date.now();
+    const fallback = DEFAULT_IMAGE_GENERATION_SETTINGS.providers[0];
+    const models = Array.isArray(value?.models)
+        ? Array.from(new Set(value.models.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim())))
+        : [];
+    const model = typeof value?.model === "string" && value.model.trim() ? value.model.trim() : fallback.model;
+    if (!models.includes(model)) models.unshift(model);
+    return {
+        id: typeof value?.id === "string" && value.id.trim() ? value.id.trim() : `image-provider-${index + 1}-${now}`,
+        name: typeof value?.name === "string" && value.name.trim() ? value.name.trim().slice(0, 40) : `生图服务 ${index + 1}`,
+        requestMode: value?.requestMode === "server" ? "server" : "direct",
+        apiKey: typeof value?.apiKey === "string" ? value.apiKey : "",
+        baseUrl: typeof value?.baseUrl === "string" && value.baseUrl.trim() ? value.baseUrl.trim() : fallback.baseUrl,
+        model,
+        models,
+        size: typeof value?.size === "string" && value.size.trim() ? value.size.trim() : fallback.size,
+        quality: typeof value?.quality === "string" && value.quality.trim() ? value.quality.trim() : fallback.quality,
+        extraPrompt: typeof value?.extraPrompt === "string" ? value.extraPrompt : "",
+        createdAt: typeof value?.createdAt === "number" ? value.createdAt : now,
+        updatedAt: typeof value?.updatedAt === "number" ? value.updatedAt : now,
+    };
+}
+
 function normalizeImageGenerationSettings(settings: Partial<ImageGenerationSettings> | null | undefined): ImageGenerationSettings {
     const refs = settings?.characterReferences && typeof settings.characterReferences === "object"
         ? settings.characterReferences
@@ -670,10 +712,42 @@ function normalizeImageGenerationSettings(settings: Partial<ImageGenerationSetti
     const maxUploadBytes = typeof hosting.maxUploadBytes === "number"
         ? Math.max(64 * 1024, Math.min(32 * 1024 * 1024, Math.floor(hosting.maxUploadBytes)))
         : DEFAULT_IMAGE_GENERATION_SETTINGS.imageHosting.maxUploadBytes;
+    const legacyProvider: Partial<ImageProvider> = {
+        id: "image-provider-default",
+        name: "原版配置",
+        requestMode,
+        apiKey: typeof settings?.apiKey === "string" ? settings.apiKey : "",
+        baseUrl: typeof settings?.baseUrl === "string" ? settings.baseUrl : DEFAULT_IMAGE_GENERATION_SETTINGS.baseUrl,
+        model: typeof settings?.model === "string" ? settings.model : DEFAULT_IMAGE_GENERATION_SETTINGS.model,
+        models: typeof settings?.model === "string" ? [settings.model] : [DEFAULT_IMAGE_GENERATION_SETTINGS.model],
+        size: typeof settings?.size === "string" ? settings.size : DEFAULT_IMAGE_GENERATION_SETTINGS.size,
+        quality: typeof settings?.quality === "string" ? settings.quality : DEFAULT_IMAGE_GENERATION_SETTINGS.quality,
+        extraPrompt: typeof settings?.extraPrompt === "string" ? settings.extraPrompt : "",
+        createdAt: 0,
+        updatedAt: 0,
+    };
+    const providers = Array.isArray(settings?.providers) && settings.providers.length > 0
+        ? settings.providers.map((item, index) => normalizeImageProvider(item, index))
+        : [normalizeImageProvider(legacyProvider, 0)];
+    const uniqueProviders = Array.from(new Map(providers.map((item) => [item.id, item])).values());
+    const activeProvider = uniqueProviders.find((item) => item.id === settings?.activeProviderId) ?? uniqueProviders[0];
+    const validProviderIds = new Set(uniqueProviders.map((item) => item.id));
+    const characterProviderBindings = settings?.characterProviderBindings && typeof settings.characterProviderBindings === "object"
+        ? Object.fromEntries(Object.entries(settings.characterProviderBindings).filter(([, providerId]) => typeof providerId === "string" && validProviderIds.has(providerId)))
+        : {};
     return {
         ...DEFAULT_IMAGE_GENERATION_SETTINGS,
         ...(settings || {}),
-        requestMode,
+        providers: uniqueProviders,
+        activeProviderId: activeProvider.id,
+        characterProviderBindings,
+        requestMode: activeProvider.requestMode,
+        apiKey: activeProvider.apiKey,
+        baseUrl: activeProvider.baseUrl,
+        model: activeProvider.model,
+        size: activeProvider.size,
+        quality: activeProvider.quality,
+        extraPrompt: activeProvider.extraPrompt,
         characterReferences: refs,
         imageHosting: {
             ...DEFAULT_IMAGE_GENERATION_SETTINGS.imageHosting,
@@ -830,6 +904,14 @@ export function removeApiConfigReferences(apiConfigId: string): void {
             ...binding,
             defaults: cleanSlot(binding.defaults),
             appOverrides: cleanSlotMap(binding.appOverrides),
+            autoWake: binding.autoWake ? {
+                writerApiConfigId: binding.autoWake.writerApiConfigId === apiConfigId
+                    ? undefined
+                    : binding.autoWake.writerApiConfigId,
+                toolApiConfigId: binding.autoWake.toolApiConfigId === apiConfigId
+                    ? undefined
+                    : binding.autoWake.toolApiConfigId,
+            } : undefined,
         })),
     };
     if (config.appDefaults) next.appDefaults = cleanSlotMap(config.appDefaults);
@@ -847,6 +929,25 @@ export function removeApiConfigReferences(apiConfigId: string): void {
         }
     }
     if (changed) saveBindingConfig(next);
+}
+
+/**
+ * Resolve the two-model proactive-message pipeline for one character.
+ * Visible wording follows the character's Chat app model unless explicitly
+ * overridden; the background reader falls back to the writer so old data keeps
+ * working before the user chooses a dedicated inexpensive tool model.
+ */
+export function resolveAutoWakeModelBinding(
+    config: BindingConfig,
+    characterId: string,
+): { writerApiConfigId?: string; toolApiConfigId?: string } {
+    const binding = getCharacterBinding(config, characterId);
+    const chatApiConfigId = resolveBinding(config, characterId, "chat").apiConfigId;
+    const writerApiConfigId = binding.autoWake?.writerApiConfigId || chatApiConfigId;
+    return {
+        writerApiConfigId,
+        toolApiConfigId: binding.autoWake?.toolApiConfigId || writerApiConfigId,
+    };
 }
 
 export function getCharacterBinding(config: BindingConfig, characterId: string): CharacterBinding {

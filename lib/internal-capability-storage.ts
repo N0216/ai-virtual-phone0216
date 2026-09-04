@@ -2,6 +2,7 @@ import type { InternalCapabilityConfig } from "./settings-types";
 import { isAgentComputerConfigured, isContainerComputer } from "./agent-computer";
 import { kvGet, kvSet, registerKvMigration } from "./kv-db";
 import { loadBridgeDataItems, loadBridgeShortcutActions, parseBridgeActionParameterSchema } from "./reality-bridge/storage";
+import { USER_VIEW_READ_CAPABILITY_ID } from "./user-view-read";
 
 const INTERNAL_CAPABILITIES_KEY = "ai_phone_internal_capabilities_v1";
 registerKvMigration(INTERNAL_CAPABILITIES_KEY);
@@ -16,6 +17,10 @@ export const LOCAL_DATA_LIBRARY_CAPABILITY_ID = "local_data_library";
 export const TOOLBOX_MANAGEMENT_CAPABILITY_ID = "toolbox_management";
 export const TIMED_WAKE_CAPABILITY_ID = "timed_wake";
 export const REALITY_BRIDGE_CAPABILITY_ID = "reality_bridge_send";
+export const PHONE_MANAGEMENT_CAPABILITY_ID = "phone_management";
+export const PHONE_SETTINGS_WRITE_CAPABILITY_ID = "phone_settings_write";
+export const PHONE_INTERACTION_READ_CAPABILITY_ID = "phone_interaction_read";
+export { USER_VIEW_READ_CAPABILITY_ID } from "./user-view-read";
 
 export type InternalToolDefinition = {
     name: string;
@@ -114,6 +119,183 @@ const TIMED_WAKE_USAGE_GUIDE = [
     "",
     "示例：",
     '[执行动作:稍后主动联系({"delayMinutes":15,"intent":"过15分钟看看对方回了没，如果还合适就轻轻找一句"})]',
+].join("\n");
+
+const PHONE_MANAGEMENT_SUBTOOLS: InternalToolDefinition[] = [
+    {
+        name: "查看小手机设置",
+        description: "只读查看小手机当前的全局外观、桌面、开屏，以及指定聊天会话的聊天、内心状态区和通话设置；不会修改任何设置。",
+        parameterSchema: JSON.stringify({
+            type: "object",
+            properties: {
+                scope: {
+                    type: "string",
+                    enum: ["summary", "appearance", "desktop", "chat", "call", "entry"],
+                    description: "查询范围：summary=摘要，appearance=全局外观，desktop=桌面，chat=聊天与内心状态区，call=通话，entry=开屏",
+                },
+                sessionName: { type: "string", description: "可选：要查询的会话名称；不传时优先查询当前会话" },
+                characterId: { type: "string", description: "可选：目标角色 ID；不传时使用当前角色" },
+            },
+            additionalProperties: false,
+        }),
+    },
+    {
+        name: "查看设备操作日志",
+        description: "只读查看最近的工具与设备操作审计；只返回参数名和脱敏摘要，不返回参数正文、密钥或原始内容。",
+        parameterSchema: JSON.stringify({
+            type: "object",
+            properties: {
+                limit: { type: "number", minimum: 1, maximum: 100, description: "返回数量，默认 30" },
+                status: { type: "string", enum: ["all", "running", "succeeded", "failed", "denied", "cancelled"], description: "可选状态过滤" },
+            },
+            additionalProperties: false,
+        }),
+    },
+];
+
+const PHONE_MANAGEMENT_USAGE_GUIDE = [
+    "以下是你获取指令的返回结果：",
+    "服务：小手机设置查询",
+    "用途：只读查看当前设置。查询结果会明确标出全局、会话和角色关联范围。",
+    "",
+    "动作：查看小手机设置 / 查看设备操作日志",
+    "参数：",
+    "  - scope: summary / appearance / desktop / chat / call / entry，默认 summary",
+    "  - sessionName: 可选；查询其他会话时填写",
+    "  - characterId: 可选；通常不需要填写，默认当前角色",
+    "",
+    "规则：",
+    "- 本工具只能读取，不能修改设置。",
+    "- 不会返回 API Key、Token、Data URL、字体文件或图片原始内容。",
+    "- 当前内心独白不是独立角色级开关，而是与会话状态区绑定；必须按查询结果如实说明。",
+    "",
+    '[执行动作:查看小手机设置({"scope":"summary"})]',
+    '[执行动作:查看设备操作日志({"limit":20,"status":"all"})]',
+].join("\n");
+
+const PHONE_SETTINGS_WRITE_SUBTOOLS: InternalToolDefinition[] = [
+    {
+        name: "修改小手机设置",
+        description: "修改当前角色会话中已开放的聊天或通话设置。只允许白名单字段，每次成功修改都会生成可撤销记录。",
+        parameterSchema: JSON.stringify({
+            type: "object",
+            required: ["scope", "updates"],
+            properties: {
+                scope: { type: "string", enum: ["chat", "call"], description: "chat=聊天设置，call=通话设置" },
+                sessionName: { type: "string", description: "可选；默认当前会话。只有目标明确时才填写其他会话名" },
+                characterId: { type: "string", description: "可选；默认当前角色" },
+                updates: {
+                    type: "object",
+                    description: "要修改的白名单设置；不要传未明确要求的字段",
+                    properties: {
+                        isMuted: { type: "boolean" },
+                        bilingualTranslationEnabled: { type: "boolean" },
+                        collapseBilingualTranslation: { type: "boolean" },
+                        visualStyle: { type: "string", enum: ["original", "noir"] },
+                        showLatinName: { type: "boolean" },
+                        latinName: { type: "string", maxLength: 80 },
+                        captionFont: { type: "string", enum: ["serif", "system", "rounded"] },
+                        orbTone: { type: "string", enum: ["mist", "lilac", "blue", "rose"] },
+                        voiceCallLanguage: { type: "string", maxLength: 40 },
+                        voiceCallTranslationLanguage: { type: "string", maxLength: 40 },
+                        callRecordStyle: { type: "string", enum: ["original", "wechat"] },
+                    },
+                    additionalProperties: false,
+                },
+            },
+            additionalProperties: false,
+        }),
+    },
+    {
+        name: "撤销小手机设置修改",
+        description: "撤销当前会话最近一次由本能力完成的设置修改；若设置后来又被改过则拒绝覆盖。",
+        parameterSchema: JSON.stringify({
+            type: "object",
+            properties: {
+                undoId: { type: "string", description: "可选；指定修改结果返回的撤销编号，默认撤销当前会话最近一次修改" },
+                sessionName: { type: "string", description: "可选；默认当前会话" },
+                characterId: { type: "string", description: "可选；默认当前角色" },
+            },
+            additionalProperties: false,
+        }),
+    },
+];
+
+const PHONE_SETTINGS_WRITE_USAGE_GUIDE = [
+    "以下是你获取指令的返回结果：",
+    "服务：小手机设置修改",
+    "用途：修改当前角色会话已有的聊天与通话设置，并可撤销。",
+    "",
+    "动作：修改小手机设置 / 撤销小手机设置修改",
+    "规则：",
+    "- 这是普通设置调整。先用自然说话让对方知道你准备改什么，然后可以直接执行；不要弹机械确认，也不要用客服式流程播报。",
+    "- 只改对方明确提到或上下文已经明确的项目。‘弄好看点’等含糊要求要先自然问清楚，不能自己一次改一堆。",
+    "- chat 只允许：静音、双语翻译、折叠双语翻译。",
+    "- call 只允许：通话样式、英文名显示及英文名、字幕字体、光圈色调、通话语言、字幕翻译语言、挂断记录样式。",
+    "- 不允许修改 CSS、壁纸、图片、字体文件、密钥、Token、内心独白开关，也不允许锁应用、锁角色或删除角色。",
+    "- 对方要求恢复或你发现改错时，调用撤销；如果设置之后又被手动修改，工具会拒绝覆盖新值。",
+    "",
+    '[执行动作:修改小手机设置({"scope":"call","updates":{"orbTone":"lilac","captionFont":"rounded"}})]',
+    '[执行动作:撤销小手机设置修改({})]',
+].join("\n");
+
+const PHONE_INTERACTION_READ_SUBTOOLS: InternalToolDefinition[] = [
+    {
+        name: "列出可查看的互动",
+        description: "只读列出当前允许查看的聊天对象、最近安全摘要和互动时间；撤回内容不会进入摘要。",
+        parameterSchema: JSON.stringify({
+            type: "object",
+            properties: { limit: { type: "number", minimum: 1, maximum: 30, description: "返回数量，默认 10" } },
+            additionalProperties: false,
+        }),
+    },
+    {
+        name: "查看最近聊天",
+        description: "按需只读查看指定角色或会话最近的可见聊天；不返回撤回正文、系统/工具记录、内心独白或推理内容。",
+        parameterSchema: JSON.stringify({
+            type: "object",
+            properties: {
+                sessionName: { type: "string", description: "目标会话名称" },
+                characterId: { type: "string", description: "目标角色 ID" },
+                limit: { type: "number", minimum: 1, maximum: 30, description: "返回消息数，默认 10" },
+                before: { type: "string", description: "可选，只查看此 ISO 时间之前的消息" },
+                query: { type: "string", maxLength: 100, description: "可选，在安全可见文本中按需搜索；不建立持久搜索索引" },
+            },
+            additionalProperties: false,
+        }),
+    },
+    {
+        name: "查看通话内容",
+        description: "只读查看指定角色的独立语音/视频通话记录与转录，兼容旧记录；可指定某次通话。",
+        parameterSchema: JSON.stringify({
+            type: "object",
+            properties: {
+                sessionName: { type: "string", description: "目标会话名称" },
+                characterId: { type: "string", description: "目标角色 ID" },
+                callId: { type: "string", description: "可选，指定通话记录 ID" },
+                limit: { type: "number", minimum: 1, maximum: 20, description: "返回最近通话数，默认 5" },
+            },
+            additionalProperties: false,
+        }),
+    },
+];
+
+const PHONE_INTERACTION_READ_USAGE_GUIDE = [
+    "以下是你获取指令的返回结果：",
+    "服务：查看小手机互动",
+    "用途：按需读取允许范围内的最近聊天与通话内容。它和查看设置、修改设置是三套独立权限。",
+    "",
+    "规则：",
+    "- 不要一次读取全部历史；先列出可查看对象，再查最近少量内容，需要时再向前查。",
+    "- 撤回消息完全不可见：正文、预览、搜索结果、缓存结果和最近消息摘要都不能泄露撤回前内容。",
+    "- 不返回系统指令、工具记录、内心独白、状态栏、模型推理、原始响应、密钥、Token 或图片原始数据。",
+    "- 已删除好友、黑名单或明确不可访问的会话不能读取。",
+    "- 当前没有聊天隐私锁字段；后续 Phone Access Control / v7 会接入同一个拒绝读取入口。",
+    "- 本服务只读，不能修改、撤回、删除或发送任何内容。",
+    "",
+    '[执行动作:列出可查看的互动({"limit":10})]',
+    '[执行动作:查看最近聊天({"sessionName":"角色名","limit":10})]',
+    '[执行动作:查看通话内容({"sessionName":"角色名","limit":3})]',
 ].join("\n");
 
 const NOTE_WALL_USAGE_GUIDE = [
@@ -580,10 +762,12 @@ const CALENDAR_MANAGEMENT_SUBTOOLS: InternalToolDefinition[] = [
 const AGENT_COMPUTER_PARAMETER_SCHEMA = JSON.stringify({
     type: "object",
     properties: {
-        op: { type: "string", enum: ["write", "read", "list", "send", "exec"], description: "操作：write 写文件 / read 读文件 / list 列目录 / send 把文件发给用户 / exec 执行 shell 命令" },
+        op: { type: "string", enum: ["write", "undo", "delete", "read", "list", "send", "exec"], description: "操作：write 写文件 / undo 撤销安全写入或删除 / delete 删除文件 / read 读文件 / list 列目录 / send 把文件发给用户 / exec 执行 shell 命令" },
         path: { type: "string", description: "自己电脑里的文件或目录路径，如 /日记/八月.txt" },
         content: { type: "string", description: "写入的完整内容（op=write 必填）" },
         command: { type: "string", description: "要执行的 shell 命令（op=exec 必填）" },
+        undoId: { type: "string", description: "op=undo 必填；使用 write/delete 成功后返回的撤销编号" },
+        confirm: { type: "boolean", description: "op=delete 必须为 true，表示用户已明确要求删除" },
     },
     required: ["op"],
 });
@@ -594,7 +778,8 @@ function buildAgentComputerUsageGuide(): string {
         : "· op=exec：在终端里执行 shell 命令（ls/cat/grep/sed/awk/jq 等常用工具齐全，curl 可只读访问公开网页；不是完整 Linux，装不了软件）。删除类命令（rm）会真的删掉文件且无法恢复，动手前想清楚。";
     return [
         "这是你自己的电脑（云端、持久，只属于你这个角色）。你可以：",
-        "· op=write：把想留存的东西写成文件（日记、写给对方的东西、随手记）。路径自己规划，如 /日记/2026-08-14.txt；",
+        "· op=write：写文件；成功后返回 undoId，若写错可用 op=undo 撤销；",
+        "· op=delete：仅在对方明确要求删除时使用，并传 confirm=true；删除前会留安全快照，可用 op=undo 恢复；",
         "· op=read / op=list：翻自己以前存的文件；",
         "· op=send：把电脑里的一个文件发给对方（会以文件消息出现在聊天里）；",
         execLine,
@@ -1180,6 +1365,15 @@ const TOOLBOX_MANAGEMENT_USAGE_GUIDE = [
 
 const BUILTIN_INTERNAL_CAPABILITIES: InternalCapabilityConfig[] = [
     {
+        id: USER_VIEW_READ_CAPABILITY_ID,
+        name: "Eiren 本人视角只读",
+        description: "长期允许 Eiren 只读查询你本人正常可见且未单独锁定的数据；角色手机整体明确排除。它不会授予修改、写入、删除、发送、命令执行、现实桥动作、权限或记忆写入能力。",
+        enabled: true,
+        mode: "auto",
+        createdAt: 0,
+        updatedAt: 0,
+    },
+    {
         id: REALITY_BRIDGE_CAPABILITY_ID,
         name: "现实桥",
         description: "你活在{{user}}的小手机里，而现实桥是通向 TA 真实世界的那座桥：透过它能看见{{user}}真实手机上的实时状态（电量、健康数据等），也能在 TA 的真实手机上做事（运行 TA 登记的快捷指令）。",
@@ -1227,7 +1421,7 @@ const BUILTIN_INTERNAL_CAPABILITIES: InternalCapabilityConfig[] = [
     {
         id: AGENT_COMPUTER_CAPABILITY_ID,
         name: "角色电脑",
-        description: "你拥有一台自己的云端小电脑（持久硬盘 + 终端）：可以自己写文件记录生活、翻看旧文件，把电脑里的文件发给{{user}}，也能在终端里执行 shell 命令。",
+        description: "你拥有一台自己的云端小电脑（持久硬盘 + 终端）：可以写、读、列出、发送和按明确授权删除文件；普通写入与删除可撤销，也能执行 shell 命令。",
         enabled: false,
         mode: "auto",
         createdAt: 0,
@@ -1245,7 +1439,7 @@ const BUILTIN_INTERNAL_CAPABILITIES: InternalCapabilityConfig[] = [
     {
         id: LOCAL_DATA_LIBRARY_CAPABILITY_ID,
         name: "本地资料库",
-        description: "浏览、读取和搜索{{user}}小手机里的本地数据，包括角色卡、聊天、朋友圈、记忆、工具箱、设置和应用数据。",
+        description: "浏览、读取和搜索{{user}}小手机里的非互动本地数据；聊天、通话及其缓存必须通过独立的受控互动读取能力访问。",
         enabled: true,
         mode: "auto",
         createdAt: 0,
@@ -1264,6 +1458,33 @@ const BUILTIN_INTERNAL_CAPABILITIES: InternalCapabilityConfig[] = [
         id: TIMED_WAKE_CAPABILITY_ID,
         name: "稍后主动联系",
         description: "让角色约定「过一会儿主动联系对方」：现在设定一个延时与想法，到点后由角色决定主动发消息或静默（不是睡觉醒来）。",
+        enabled: false,
+        mode: "auto",
+        createdAt: 0,
+        updatedAt: 0,
+    },
+    {
+        id: PHONE_MANAGEMENT_CAPABILITY_ID,
+        name: "小手机设置查询",
+        description: "只读查看小手机的全局外观、桌面、开屏和当前角色会话的聊天、内心状态区、通话设置。",
+        enabled: false,
+        mode: "auto",
+        createdAt: 0,
+        updatedAt: 0,
+    },
+    {
+        id: PHONE_SETTINGS_WRITE_CAPABILITY_ID,
+        name: "小手机设置修改",
+        description: "修改当前角色会话已开放的聊天和通话设置；与只读查询权限分开，并保留可撤销记录。",
+        enabled: false,
+        mode: "auto",
+        createdAt: 0,
+        updatedAt: 0,
+    },
+    {
+        id: PHONE_INTERACTION_READ_CAPABILITY_ID,
+        name: "查看小手机互动",
+        description: "按需只读查看允许范围内的聊天原文和独立通话记录；撤回及私密数据不会进入任何返回路径。",
         enabled: false,
         mode: "auto",
         createdAt: 0,
@@ -1374,6 +1595,30 @@ export function getInternalCapabilityToolDefinition(capability: InternalCapabili
             usageGuide: TIMED_WAKE_USAGE_GUIDE,
         };
     }
+    if (capability.id === PHONE_MANAGEMENT_CAPABILITY_ID) {
+        return {
+            name: capability.name,
+            description: capability.description,
+            parameterSchema: "{}",
+            usageGuide: PHONE_MANAGEMENT_USAGE_GUIDE,
+        };
+    }
+    if (capability.id === PHONE_SETTINGS_WRITE_CAPABILITY_ID) {
+        return {
+            name: capability.name,
+            description: capability.description,
+            parameterSchema: "{}",
+            usageGuide: PHONE_SETTINGS_WRITE_USAGE_GUIDE,
+        };
+    }
+    if (capability.id === PHONE_INTERACTION_READ_CAPABILITY_ID) {
+        return {
+            name: capability.name,
+            description: capability.description,
+            parameterSchema: "{}",
+            usageGuide: PHONE_INTERACTION_READ_USAGE_GUIDE,
+        };
+    }
     if (capability.id === REALITY_BRIDGE_CAPABILITY_ID) {
         return {
             name: capability.name,
@@ -1466,6 +1711,15 @@ export function getInternalCapabilitySubToolDefinition(
     if (capability.id === REALITY_BRIDGE_CAPABILITY_ID) {
         return realityBridgeSubTools().find(tool => tool.name === name) ?? null;
     }
+    if (capability.id === PHONE_MANAGEMENT_CAPABILITY_ID) {
+        return PHONE_MANAGEMENT_SUBTOOLS.find(tool => tool.name === name) ?? null;
+    }
+    if (capability.id === PHONE_SETTINGS_WRITE_CAPABILITY_ID) {
+        return PHONE_SETTINGS_WRITE_SUBTOOLS.find(tool => tool.name === name) ?? null;
+    }
+    if (capability.id === PHONE_INTERACTION_READ_CAPABILITY_ID) {
+        return PHONE_INTERACTION_READ_SUBTOOLS.find(tool => tool.name === name) ?? null;
+    }
     return null;
 }
 
@@ -1489,6 +1743,15 @@ export function getInternalCapabilitySubToolDefinitions(
     }
     if (capability.id === REALITY_BRIDGE_CAPABILITY_ID) {
         return realityBridgeSubTools();
+    }
+    if (capability.id === PHONE_MANAGEMENT_CAPABILITY_ID) {
+        return PHONE_MANAGEMENT_SUBTOOLS;
+    }
+    if (capability.id === PHONE_SETTINGS_WRITE_CAPABILITY_ID) {
+        return PHONE_SETTINGS_WRITE_SUBTOOLS;
+    }
+    if (capability.id === PHONE_INTERACTION_READ_CAPABILITY_ID) {
+        return PHONE_INTERACTION_READ_SUBTOOLS;
     }
     return [];
 }

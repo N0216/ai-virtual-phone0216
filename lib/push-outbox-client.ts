@@ -13,6 +13,7 @@ import { isPersonalPushCloudActive, loadPersonalPushCloudState, personalPushFetc
 import { removeTimedWakeSchedule } from "./timed-wake-storage";
 import { loadScreenChatSettings, saveScreenChatAck } from "./reality-bridge/storage";
 import { estimateUsageFromText, recordModelUsage, usageCategoryForChatRequest } from "./model-usage";
+import { recordAutoWakeLog } from "./auto-wake-log";
 
 type OutboxEntry = {
     id: string;
@@ -32,6 +33,7 @@ type OutboxEntry = {
         armAt?: string;
         usageModel?: string;
         usageRequestChars?: number;
+        shortcutActionNote?: string;
     } | null;
     created_at: string;
 };
@@ -216,6 +218,35 @@ export async function consumeServerOutbox(options?: { silent?: boolean; force?: 
                         existingMessages,
                         { silent: options?.silent !== false },
                     );
+                    if (usageCategoryForChatRequest(meta.appId ?? "chat", meta.appTags) === "auto_wake") {
+                        const tags = new Set(meta.appTags || []);
+                        const trigger = tags.has("idle_wake")
+                            ? "角色自动醒来"
+                            : tags.has("user_timed_wake")
+                                ? "用户定时消息"
+                                : tags.has("timed_wake")
+                                    ? "定时主动消息"
+                                    : tags.has("period_care")
+                                        ? "经期关怀"
+                                        : "自动醒来";
+                        recordAutoWakeLog({
+                            characterName: meta.characterName || "角色",
+                            trigger,
+                            model: meta.usageModel,
+                            decision: hasVisible ? "sent" : "silent",
+                            detail: [
+                                hasVisible ? "角色决定发送消息，已写回正式聊天记录。" : "角色完成检查后选择静默，没有发送聊天消息。",
+                                meta.shortcutActionNote?.startsWith("shortcut sent:")
+                                    ? `并请求运行 iPhone 快捷指令「${meta.shortcutActionNote.slice("shortcut sent:".length).split(",")[0].trim()}」。`
+                                    : meta.shortcutActionNote?.startsWith("shortcut unknown:")
+                                        ? `角色想运行快捷指令，但名称「${meta.shortcutActionNote.slice("shortcut unknown:".length).trim()}」不在已授权目录。`
+                                        : meta.shortcutActionNote?.includes("failed")
+                                            ? "角色尝试调用快捷指令，但本次没有成功送达。"
+                                            : "",
+                            ].filter(Boolean).join(" "),
+                            timestamp: Date.parse(entry.created_at) || Date.now(),
+                        });
+                    }
                     if (hasVisible && newCount < 10) scheduleFollowUp(sessionId, newCount, stateValues);
                     clearTimedWakeIfHandled(entry.trigger_key);
                     consumedIds.push(entry.id);

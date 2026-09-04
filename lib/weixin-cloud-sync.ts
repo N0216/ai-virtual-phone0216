@@ -15,6 +15,7 @@ import {
 } from "./chat-storage";
 import { loadCharacters } from "./character-storage";
 import type { Character } from "./character-types";
+import { resolveImageGenerationProvider } from "./image-generation-service";
 import {
   loadApiConfigs,
   loadBindingConfig,
@@ -1136,7 +1137,8 @@ async function buildWeixinCloudPromptContext(params: {
 }
 
 async function buildWeixinCloudImageGenerationContext(characterId: string): Promise<WeixinCloudImageGenerationContext> {
-  const settings = loadImageGenerationSettings();
+  const sourceSettings = loadImageGenerationSettings();
+  const settings = resolveImageGenerationProvider(sourceSettings, characterId).settings;
   const reference = settings.characterReferences?.[characterId];
   const referenceImageDataUrl = reference?.assetId
     ? await getChatImageFromIndexedDB(reference.assetId).catch(() => null)

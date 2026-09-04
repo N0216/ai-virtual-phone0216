@@ -4,6 +4,7 @@
 // 通用 LLM 调用）共用这份日志，统一在「底层调用大模型日志」面板查看。
 
 import { kvGet, kvSet, kvRemove, registerKvMigration } from "./kv-db";
+import { redactSensitiveLogText } from "./log-redaction";
 
 export type DebugInfo = {
     id: string;
@@ -49,7 +50,7 @@ function _loadLogs(key: string): DebugInfo[] {
         const raw = typeof window !== "undefined" ? kvGet(key) : null;
         if (!raw) return [];
         const parsed: unknown = JSON.parse(raw);
-        return Array.isArray(parsed) ? parsed as DebugInfo[] : [];
+        return Array.isArray(parsed) ? (parsed as DebugInfo[]).map(sanitizeLoadedLog) : [];
     } catch { return []; }
 }
 function _saveLogs(key: string, logs: DebugInfo[]): void {
@@ -59,6 +60,22 @@ function _saveLogs(key: string, logs: DebugInfo[]): void {
 function truncateForLog(text: string, limit: number): string {
     if (text.length <= limit) return text;
     return `${text.slice(0, limit)}\n…[日志截断：原文共 ${text.length} 字符]`;
+}
+
+function sanitizeLoadedLog(entry: DebugInfo): DebugInfo {
+    return {
+        ...entry,
+        characterName: entry.characterName !== undefined ? redactSensitiveLogText(String(entry.characterName)) : undefined,
+        model: entry.model !== undefined ? redactSensitiveLogText(String(entry.model)) : undefined,
+        messages: Array.isArray(entry.messages) ? entry.messages.map(message => ({
+            ...message,
+            role: redactSensitiveLogText(String(message.role ?? "")),
+            content: redactSensitiveLogText(String(message.content ?? "")),
+            marker: message.marker !== undefined ? redactSensitiveLogText(String(message.marker)) : undefined,
+        })) : [],
+        rawResponse: redactSensitiveLogText(String(entry.rawResponse ?? "")),
+        reasoning: entry.reasoning !== undefined ? redactSensitiveLogText(String(entry.reasoning)) : undefined,
+    };
 }
 
 function truncateMessagesForLog(messages: DebugInfo["messages"]): DebugInfo["messages"] {
@@ -93,15 +110,20 @@ function truncateMessagesForLog(messages: DebugInfo["messages"]): DebugInfo["mes
 }
 
 function truncateEntryForLog(entry: Omit<DebugInfo, "id" | "timestamp">): Omit<DebugInfo, "id" | "timestamp"> {
+    const sanitized = sanitizeLoadedLog({
+        ...entry,
+        id: "",
+        timestamp: "",
+    });
     return {
         ...entry,
-        characterName: entry.characterName !== undefined
-            ? truncateForLog(entry.characterName, MAX_LOG_METADATA_CHARS)
+        characterName: sanitized.characterName !== undefined
+            ? truncateForLog(sanitized.characterName, MAX_LOG_METADATA_CHARS)
             : undefined,
-        model: entry.model !== undefined ? truncateForLog(entry.model, MAX_LOG_METADATA_CHARS) : undefined,
-        messages: truncateMessagesForLog(entry.messages),
-        rawResponse: truncateForLog(entry.rawResponse, MAX_LOG_RESPONSE_CHARS),
-        reasoning: entry.reasoning !== undefined ? truncateForLog(entry.reasoning, MAX_LOG_RESPONSE_CHARS) : undefined,
+        model: sanitized.model !== undefined ? truncateForLog(sanitized.model, MAX_LOG_METADATA_CHARS) : undefined,
+        messages: truncateMessagesForLog(sanitized.messages),
+        rawResponse: truncateForLog(sanitized.rawResponse, MAX_LOG_RESPONSE_CHARS),
+        reasoning: sanitized.reasoning !== undefined ? truncateForLog(sanitized.reasoning, MAX_LOG_RESPONSE_CHARS) : undefined,
     };
 }
 

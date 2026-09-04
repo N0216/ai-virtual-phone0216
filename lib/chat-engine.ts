@@ -53,7 +53,7 @@ import {
 import { setDebugPromptSnapshot, type DebugPromptSnapshot } from "./debug-store";
 import { extractFinishReason } from "./api-helpers";
 import { loadMemoryConfig, incrementEventCounter } from "./memory-storage";
-import { formatRoleCloudContextForPrompt } from "./role-memory-sync";
+import { formatRoleCloudContextForPrompt, refreshRoleCloudContextBeforeReply } from "./role-memory-sync";
 import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { maybeRunSummarization } from "./memory-summarizer";
@@ -61,7 +61,13 @@ import { prepareShortTermContext } from "./short-term-assembler";
 import { parseActionTags, dispatchActions } from "./action-parser";
 import { findEnabledToolForSchema, getEnabledTools, type EnabledTool } from "./tool-storage";
 import { formatToolsForPrompt, formatToolSchema } from "./tool-prompt";
-import { parseToolCalls, parseToolFetches, executeToolCalls, formatToolResults } from "./tool-executor";
+import {
+    parseToolCalls,
+    parseToolFetches,
+    executeToolCalls,
+    formatToolResults,
+    readMobileDaddyWakeContextForAutoWake,
+} from "./tool-executor";
 import type { ToolCall, ToolResult } from "./tool-executor";
 import { getCustomStickerNames, getCustomStickerExample } from "./custom-sticker-storage";
 import { formatCustomAppChatDirectivesForPrompt } from "./custom-app-chat-directives";
@@ -72,7 +78,9 @@ import { buildCalendarScheduleMarker, getCurrentCalendarScheduleForPrompt } from
 import { getWeekStartIso } from "./calendar-utils";
 import { buildCharacterTimeContext } from "./character-time";
 import { getPromptTimestampOptionsForTimeContext } from "./prompt-time";
-import { kvGet, kvSet, kvRemove, registerKvMigration } from "./kv-db";
+import { kvGet, kvSet, registerKvMigration } from "./kv-db";
+import { pushApiLog, getApiLogs, clearApiLogs, type DebugInfo } from "./api-log-store";
+import { redactSensitiveLogText } from "./log-redaction";
 import { stripStateAndInnerForPrompt } from "./prompt-sanitizer";
 import { getInternalCapability, getInternalCapabilitySubToolDefinitions } from "./internal-capability-storage";
 import { isMediaStoreRef, loadMediaBlob } from "./media-cache-storage";
@@ -340,32 +348,9 @@ export function applyVisionImagePromptLimit(history: ChatMessage[], limitValue: 
     return history;
 }
 
-// API Log store — captures recent request/response history for inspection
-export type DebugInfo = {
-    id: string;
-    characterName?: string;
-    model?: string;
-    messages: { role: string; content: string; marker?: string }[];
-    rawResponse: string;
-    timestamp: string;
-    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
-};
-const MAX_API_LOGS = 50;
-const API_LOGS_KEY = "ai_phone_api_logs_v1";
-registerKvMigration(API_LOGS_KEY);
-
-function _loadLogs(): DebugInfo[] {
-    try {
-        const raw = typeof window !== "undefined" ? kvGet(API_LOGS_KEY) : null;
-        return raw ? JSON.parse(raw) as DebugInfo[] : [];
-    } catch { return []; }
-}
-function _saveLogs(logs: DebugInfo[]): void {
-    try { kvSet(API_LOGS_KEY, JSON.stringify(logs)); } catch { /* quota exceeded — ignore */ }
-}
-
-export function getApiLogs(): DebugInfo[] { return _loadLogs(); }
-export function clearApiLogs(): void { try { kvRemove(API_LOGS_KEY); } catch { } }
+// 保留原有导出路径，界面调用方无需迁移；实际存储统一由 api-log-store 管理。
+export { getApiLogs, clearApiLogs };
+export type { DebugInfo };
 
 export type DebugPromptRequestOptions = {
     appId?: string;
@@ -416,13 +401,14 @@ function recordChatModelUsage(input: {
     model: string;
     requestChars: number;
     responseChars: number;
-    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; cached_prompt_tokens?: number };
 }): void {
     const estimated = estimateUsageFromText(input.requestChars, input.responseChars);
     recordModelUsage({
         category: usageCategoryForChatRequest(input.appId ?? "chat", input.appTags),
         model: input.model,
         promptTokens: input.usage?.prompt_tokens ?? estimated.promptTokens,
+        cachedPromptTokens: input.usage?.cached_prompt_tokens,
         completionTokens: input.usage?.completion_tokens ?? estimated.completionTokens,
         totalTokens: input.usage?.total_tokens ?? estimated.totalTokens,
         estimated: !input.usage?.total_tokens,
@@ -858,7 +844,7 @@ export async function sendLLMStreamRequest(
         });
         if (!response.ok) {
             const errorText = await response.text();
-            throw new ChatEngineError(`API Stream Error ${response.status}: ${errorText}`);
+            throw new ChatEngineError(`API Stream Error ${response.status}: ${redactSensitiveLogText(errorText)}`);
         }
         const { content: streamedContent, rawResponse } = await readSseStream(response, request.providerKind, pluginCallbacks ?? callbacks, !options?.skipTimestampStrip);
         if (!streamedContent.trim()) {
@@ -873,18 +859,13 @@ export async function sendLLMStreamRequest(
             ...m,
             content: typeof m.content === "string" ? m.content : "[vision: 含图片的多模态消息]",
         }));
-        const logEntry: DebugInfo = {
-            id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        pushApiLog({
             characterName: meta?.characterName,
             model: config.defaultModel,
             messages: sanitizedMessages,
             rawResponse: rawOutput,
-            timestamp: new Date().toISOString(),
-        };
-        const logs = _loadLogs();
-        logs.push(logEntry);
-        while (logs.length > MAX_API_LOGS) logs.shift();
-        _saveLogs(logs);
+            source: "chat",
+        });
         recordChatModelUsage({
             appId: options?.appId,
             appTags: options?.appTags,
@@ -908,7 +889,7 @@ export async function sendLLMStreamRequest(
             throw new ChatEngineError("AI 流式回复超时（500秒），请重试。");
         }
         if (error instanceof ChatEngineError) throw error;
-        const detail = error instanceof Error ? error.message : String(error);
+        const detail = redactSensitiveLogText(error instanceof Error ? error.message : String(error));
         throw new ChatEngineError(`Stream Network Error connecting to AI Provider: ${detail}`);
     } finally {
         clearTimeout(llmTimeout);
@@ -984,7 +965,7 @@ export async function sendLLMRequest(
 
         if (!response.ok) {
             const errorText = await response.text();
-            throw new ChatEngineError(`API Error ${response.status}: ${errorText}`);
+            throw new ChatEngineError(`API Error ${response.status}: ${redactSensitiveLogText(errorText)}`);
         }
 
         const data = await response.json();
@@ -1023,19 +1004,14 @@ export async function sendLLMRequest(
             ...m,
             content: typeof m.content === "string" ? m.content : "[vision: 含图片的多模态消息]",
         }));
-        const logEntry: DebugInfo = {
-            id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        pushApiLog({
             characterName: meta?.characterName,
             model: config.defaultModel,
             messages: sanitizedMessages,
             rawResponse: rawOutput,
-            timestamp: new Date().toISOString(),
             usage: parsed.usage,
-        };
-        const logs = _loadLogs();
-        logs.push(logEntry);
-        while (logs.length > MAX_API_LOGS) logs.shift();
-        _saveLogs(logs);
+            source: "chat",
+        });
         recordChatModelUsage({
             appId: options?.appId,
             appTags: options?.appTags,
@@ -1060,7 +1036,7 @@ export async function sendLLMRequest(
             throw new ChatEngineError("AI 回复超时（500秒），请重试。");
         }
         if (error instanceof ChatEngineError) throw error;
-        const detail = error instanceof Error ? error.message : String(error);
+        const detail = redactSensitiveLogText(error instanceof Error ? error.message : String(error));
         throw new ChatEngineError(
             `Network Error connecting to AI Provider: ${detail}\n请求诊断：provider=${requestDebugInfo.provider}, model=${requestDebugInfo.model}, app=${requestDebugInfo.appId}, messages=${requestDebugInfo.messageCount}, bodySize=${requestDebugInfo.bodySize}, estimatedTokens=${requestDebugInfo.bodyTokenEstimate}, largestMessage=${requestDebugInfo.largestMessageSize}, largestRole=${requestDebugInfo.largestMessageRole}, largestIndex=${requestDebugInfo.largestMessageIndex}`,
         );
@@ -1182,7 +1158,7 @@ export async function sendLLMToolStreamRequest(
 
         if (!response.ok) {
             const errorText = await response.text();
-            throw new ChatEngineError(`API Tool Stream Error ${response.status}: ${errorText}`);
+            throw new ChatEngineError(`API Tool Stream Error ${response.status}: ${redactSensitiveLogText(errorText)}`);
         }
         if (!response.body) throw new ChatEngineError("原生动作流式响应没有 body。");
 
@@ -1266,18 +1242,15 @@ export async function sendLLMToolStreamRequest(
         if (providerResponseId) {
             for (const call of toolCalls) call.providerResponseId = providerResponseId;
         }
-        const logEntry: DebugInfo = {
-            id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        const logRawResponse = JSON.stringify({ content, reasoning, toolCalls, raw: rawResponse });
+        pushApiLog({
             characterName: meta?.characterName,
             model: config.defaultModel,
             messages: sanitizedMessages,
-            rawResponse: JSON.stringify({ content, reasoning, toolCalls, raw: rawResponse }),
-            timestamp: new Date().toISOString(),
-        };
-        const logs = _loadLogs();
-        logs.push(logEntry);
-        while (logs.length > MAX_API_LOGS) logs.shift();
-        _saveLogs(logs);
+            rawResponse: logRawResponse,
+            reasoning,
+            source: "chat",
+        });
         recordChatModelUsage({
             appId: options?.appId,
             appTags: options?.appTags,
@@ -1296,7 +1269,7 @@ export async function sendLLMToolStreamRequest(
             openRouterReasoningDetails: undefined,
             toolCalls,
             truncatedToolCalls: truncatedNames.length ? truncatedNames : undefined,
-            rawResponse: logEntry.rawResponse,
+            rawResponse: logRawResponse,
             providerKind: request.providerKind,
         };
     } catch (error: unknown) {
@@ -1305,7 +1278,7 @@ export async function sendLLMToolStreamRequest(
             throw new ChatEngineError("AI 原生动作流式回复超时（500秒），请重试。");
         }
         if (error instanceof ChatEngineError) throw error;
-        const detail = error instanceof Error ? error.message : String(error);
+        const detail = redactSensitiveLogText(error instanceof Error ? error.message : String(error));
         throw new ChatEngineError(`Tool Stream Network Error connecting to AI Provider: ${detail}`);
     } finally {
         clearTimeout(llmTimeout);
@@ -1351,7 +1324,7 @@ export async function sendLLMToolRequest(
 
         if (!response.ok) {
             const errorText = await response.text();
-            throw new ChatEngineError(`API Tool Error ${response.status}: ${errorText}`);
+            throw new ChatEngineError(`API Tool Error ${response.status}: ${redactSensitiveLogText(errorText)}`);
         }
 
         const data = await response.json();
@@ -1388,19 +1361,15 @@ export async function sendLLMToolRequest(
             toolCalls: parsed.toolCalls,
             raw: parsed.raw,
         });
-        const logEntry: DebugInfo = {
-            id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        pushApiLog({
             characterName: meta?.characterName,
             model: config.defaultModel,
             messages: sanitizedMessages,
             rawResponse,
-            timestamp: new Date().toISOString(),
             usage: parsed.usage,
-        };
-        const logs = _loadLogs();
-        logs.push(logEntry);
-        while (logs.length > MAX_API_LOGS) logs.shift();
-        _saveLogs(logs);
+            reasoning: parsed.reasoning,
+            source: "chat",
+        });
         recordChatModelUsage({
             appId: options?.appId,
             appTags: options?.appTags,
@@ -1434,7 +1403,7 @@ export async function sendLLMToolRequest(
             throw new ChatEngineError("AI 原生动作回复超时（500秒），请重试。");
         }
         if (error instanceof ChatEngineError) throw error;
-        const detail = error instanceof Error ? error.message : String(error);
+        const detail = redactSensitiveLogText(error instanceof Error ? error.message : String(error));
         throw new ChatEngineError(`Tool Network Error connecting to AI Provider: ${detail}`);
     } finally {
         clearTimeout(llmTimeout);
@@ -1932,7 +1901,12 @@ export async function buildChatPromptMessages(
         : history;
 
     const now = new Date();
-    const promptTimeContext = buildCharacterTimeContext(character.timeZone, now);
+    const timeAware = loadChatAppSettings().timeAware;
+    const promptTimeContext = buildCharacterTimeContext(
+        character.timeZone,
+        now,
+        timeAware === false ? undefined : historyForPrompt,
+    );
     const promptTimestampOptions = getPromptTimestampOptionsForTimeContext(promptTimeContext);
     const memConfig = loadMemoryConfig();
     const isOfflineMode = options?.appTags?.includes("offline") === true;
@@ -1961,6 +1935,15 @@ export async function buildChatPromptMessages(
         }
     }
 
+    // Plain database refresh (no model/tool round): ensures a handoff written by
+    // the official GPT moments ago is present before this reply is prompted.
+    const roleCloudContextReady = await refreshRoleCloudContextBeforeReply(character.id).catch(() => false);
+    if (!roleCloudContextReady) {
+        throw new ChatEngineError("个人云交接刷新失败：没有取得最新内容，请检查网络后重试。");
+    }
+    const mobileDaddyWakeContext = toolUsage === "auto_wake"
+        ? await readMobileDaddyWakeContextForAutoWake(character.id).catch(() => "")
+        : "";
     const [memResults, coreResults, musicLocal, musicCloud] = await Promise.all([
         retrieveMemoriesForPrompt(character.id, wbActivationContext, memConfig).catch(() => null),
         retrieveCoreMemoriesForPrompt(character.id, memConfig).catch(() => null),
@@ -2028,7 +2011,7 @@ export async function buildChatPromptMessages(
         timeContext: promptTimeContext,
         promptTimestampOptions,
         enableVision: config.enableImageRecognition,
-        timeAware: loadChatAppSettings().timeAware,
+        timeAware,
         tools: toolsPrompt,
         customAppRichMediaDirectives,
         chatBilingualInstruction,
@@ -2040,6 +2023,9 @@ export async function buildChatPromptMessages(
         offlineSummaryTag: preset?.story_summary_tag?.trim() || "summary",
         nativeToolHistory: usesNativeActions,
     });
+    if (mobileDaddyWakeContext) {
+        llmMessages.push({ role: "system", content: mobileDaddyWakeContext });
+    }
     if (promptProfile?.output === "plain_text") {
         llmMessages.push({
             role: "system",

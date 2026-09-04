@@ -477,6 +477,8 @@ async function generateReply(env, runtime, cloudMessages, pendingMessages) {
   const messages = mergeAdjacentSameRoleMessages(
     normalizeLlmMessages(buildRuntimePromptMessages(runtime, cloudHistory, pendingMessages, imageAttachments)),
   );
+  refreshTemporalAwareness(messages, new Date());
+  ensureRuntimeModelIdentity(messages, apiConfig);
   const shortcutActions = await loadWeixinShortcutActions(env);
   appendWeixinShortcutCapability(messages, shortcutActions);
 
@@ -785,6 +787,62 @@ function clampVisionImagePromptLimit(value) {
   const n = Math.floor(Number(value));
   if (!Number.isFinite(n) || n < 0) return 1;
   return Math.min(10, n);
+}
+
+// 运行包里的模板是同步时保存的；微信实际收到消息时必须重算，而不是沿用同步当天。
+const TEMPORAL_AWARENESS_PATTERN = /<temporal_awareness\b([^>]*)>[\s\S]*?<\/temporal_awareness>/g;
+const RUNTIME_MODEL_IDENTITY_TAG = "runtime_model_identity";
+
+function ensureRuntimeModelIdentity(messages, apiConfig) {
+  const hasIdentity = messages.some(message => {
+    const content = message?.content;
+    if (typeof content === "string") return content.includes(`<${RUNTIME_MODEL_IDENTITY_TAG}`);
+    return Array.isArray(content) && content.some(part => part?.type === "text" && String(part.text || "").includes(`<${RUNTIME_MODEL_IDENTITY_TAG}`));
+  });
+  if (hasIdentity) return;
+  const provider = String(apiConfig?.provider || "unknown").trim() || "unknown";
+  const model = String(apiConfig?.defaultModel || "unknown").trim() || "unknown";
+  const escape = value => value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  messages.unshift({
+    role: "system",
+    content: [
+      `<${RUNTIME_MODEL_IDENTITY_TAG} provider="${escape(provider)}" model="${escape(model)}">`,
+      `当前实际底层模型：${model}。当前接口类型：${provider}。`,
+      "这是本轮请求的运行环境事实，不是角色姓名或人物设定。用户询问时请如实回答；无关对话中不要主动强调。你不能自行切换模型。不要猜测或泄露 API Key、接口地址等未提供的秘密。",
+      `</${RUNTIME_MODEL_IDENTITY_TAG}>`,
+    ].join("\n"),
+  });
+}
+
+export function refreshTemporalAwareness(value, now = new Date()) {
+  const attrsOf = raw => Object.fromEntries([...raw.matchAll(/([a-z_]+)="([^"]*)"/g)].map(match => [match[1], match[2]
+    .replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")]));
+  const safeZone = (raw, fallback = "UTC") => { try { if (raw) new Intl.DateTimeFormat("en-US", { timeZone: raw }).format(now); else throw new Error(); return raw; } catch { return fallback; } };
+  const parts = (date, zone) => Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(date).map(part => [part.type, part.value]));
+  const dateTime = (date, zone) => { const p = parts(date, zone); return `${Number(p.year)}年${Number(p.month)}月${Number(p.day)}日${p.hour}:${p.minute}`; };
+  const dateKey = (date, zone) => { const p = parts(date, zone); return `${p.year}-${p.month}-${p.day}`; };
+  const weekday = (date, zone) => new Intl.DateTimeFormat("zh-CN", { timeZone: zone, weekday: "long" }).format(date);
+  const dayPart = (date, zone) => { const h = Number(parts(date, zone).hour); return h < 5 ? "凌晨" : h < 8 ? "清晨" : h < 12 ? "上午" : h < 14 ? "中午" : h < 18 ? "下午" : h < 22 ? "晚上" : "深夜"; };
+  const elapsed = (iso, end) => {
+    if (!iso) return null; const start = new Date(iso); if (!Number.isFinite(start.getTime())) return null; const seconds = Math.max(0, Math.floor((end.getTime() - start.getTime()) / 1000));
+    if (seconds < 45) return "刚刚"; if (seconds < 3600) return `${Math.max(1, Math.round(seconds / 60))}分钟前`; if (seconds < 86400) { const h = Math.floor(seconds / 3600); const m = Math.floor((seconds % 3600) / 60); return m >= 10 ? `${h}小时${m}分钟前` : `${h}小时前`; }
+    const d = Math.floor(seconds / 86400); const h = Math.floor((seconds % 86400) / 3600); return h >= 2 ? `${d}天${h}小时前` : `${d}天前`;
+  };
+  const rebuild = attributeText => {
+    const attrs = attrsOf(attributeText); const systemZone = safeZone(attrs.system_time_zone); const characterZone = safeZone(attrs.character_time_zone, systemZone);
+    const rows = [`当前系统时间：${dateTime(now, systemZone)} ${systemZone}，${weekday(now, systemZone)}（${dayPart(now, systemZone)}）`];
+    if (characterZone !== systemZone) rows.push(`角色本地时间：${dateTime(now, characterZone)} ${characterZone}，${weekday(now, characterZone)}（${dayPart(now, characterZone)}）`, "判断角色作息、问候、深夜/清晨/工作时间时，优先使用角色本地时间。");
+    try { const members = attrs.group_time_zones ? JSON.parse(decodeURIComponent(attrs.group_time_zones)) : []; const memberRows = Array.isArray(members) ? members.flatMap(member => { const zone = safeZone(typeof member?.timeZone === "string" ? member.timeZone : "", systemZone); return member?.name && zone !== systemZone ? [`${member.name}：${dateTime(now, zone)} ${zone}，${weekday(now, zone)}（${dayPart(now, zone)}）`] : []; }) : []; if (memberRows.length) rows.push("群成员本地时间：", ...memberRows, "判断每个角色作息、问候、深夜/清晨/工作时间时，优先使用该角色自己的本地时间。"); } catch { /* 老运行包 */ }
+    const userGap = elapsed(attrs.last_user_at, now); const assistantGap = elapsed(attrs.last_assistant_at, now); const latestGap = elapsed(attrs.latest_at, now);
+    if (userGap) rows.push(`用户最近一条消息：${userGap}`); if (assistantGap) rows.push(`你最近一条回复：${assistantGap}`); if (latestGap) rows.push(`最近一次真实聊天活动：${latestGap}`);
+    const latest = attrs.latest_at ? new Date(attrs.latest_at) : null; const previous = attrs.previous_at ? new Date(attrs.previous_at) : null;
+    if (latest && previous && Number.isFinite(latest.getTime()) && Number.isFinite(previous.getTime())) { const gap = elapsed(previous.toISOString(), latest); if (latest.getTime() - previous.getTime() >= 1800000 && gap) rows.push(`最近两次真实聊天活动相隔：${gap}`); if (dateKey(previous, characterZone) !== dateKey(latest, characterZone)) rows.push("最近两次真实聊天活动已经跨日，不要把之前那次误称为“刚刚”。"); }
+    if (latest && Number.isFinite(latest.getTime()) && dateKey(latest, characterZone) !== dateKey(now, characterZone)) rows.push("最近一次真实聊天活动与现在不在同一天，请正确使用“昨天/前天/几天前”等措辞。");
+    rows.push("这些是系统在任务真正执行时重新计算的时间事实。请自然体现在作息、问候、等待感和措辞中；不要机械报时或复述本段，也不要假装用户刚刚发过消息。");
+    return `<temporal_awareness${attributeText}>\n${rows.join("\n")}\n</temporal_awareness>`;
+  };
+  if (!value || typeof value !== "object") return;
+  for (const key of Array.isArray(value) ? value.keys() : Object.keys(value)) { const item = value[key]; if (typeof item === "string") value[key] = item.replace(TEMPORAL_AWARENESS_PATTERN, (_match, attrs) => rebuild(attrs)); else refreshTemporalAwareness(item, now); }
 }
 
 export function buildRuntimePromptMessages(runtime, cloudHistory, pendingMessages, imageAttachments = new Map()) {

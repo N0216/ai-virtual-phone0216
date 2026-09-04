@@ -29,7 +29,7 @@ function formatDebugApiConfig(apiConfig: ApiConfig): string {
     `模型: ${apiConfig.defaultModel}`,
     `provider: ${apiConfig.provider}`,
     `baseUrl: ${apiConfig.baseUrl || "(空)"}`,
-    `apiKey: ${apiConfig.apiKey ? `***${apiConfig.apiKey.slice(-4)}` : "(空)"}`,
+    `apiKey: ${apiConfig.apiKey ? "(已配置，内容不记录)" : "(空)"}`,
     `id: ${apiConfig.id}`,
   ].join(" | ");
 }

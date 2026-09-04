@@ -10,6 +10,7 @@ export type ThemeAssetType =
   | "font"
   | "bg"
   | "chat_bg"
+  | "photo_album"
   | "sticker"
   | "vn_scene"
   | "vn_sprite";
@@ -76,6 +77,12 @@ export type ThemeProfile = {
    .chat-input-bar       — bottom input area
    .chat-bubble-role-user     — user message bubble
    .chat-bubble-role-assistant — AI message bubble
+   .chat-call-record-row       — 挂断通话记录整行（data-call-initiator=user|assistant）
+   .chat-call-record-bubble    — 沿用当前聊天样式的挂断气泡
+   .chat-call-record-heading   — 可自定义装饰与通话标题所在行
+   .chat-call-record-icon      — 可自定义装饰（文字、Emoji 或颜文字）
+   .chat-call-record-title     — 可自定义通话标题
+   .chat-call-record-copy      — 通话记录文案
    .chat-msg-content-wrap[data-html="true"] — HTML message outer width
    .chat-html-inline     — inline HTML iframe container
    .chat-html-inline-frame — inline HTML iframe
@@ -102,6 +109,8 @@ export type ThemeProfile = {
    --c-danger        : 警示/删除 (#FF3B30)
    --c-warning       : 警告 (#FF9500)
    --ctx-menu-bg     : 右键菜单背景 (#2c2c2c)
+   --chat-call-record-color  : 通话记录文字颜色
+   --chat-call-record-icon   : 通话记录图标颜色
 
    ── Context menu classes ──
    .ctx-menu              — popup action menu container

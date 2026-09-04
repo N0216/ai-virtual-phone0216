@@ -20,6 +20,7 @@ import remarkBreaks from "remark-breaks";
 import { createPortal } from "react-dom";
 import { Blocks, Maximize2, ReceiptText } from "lucide-react";
 import { retryChatGeneratedImage } from "@/lib/generated-image-retry";
+import { loadImageGenerationSettings } from "@/lib/settings-storage";
 import { GeneratedImageErrorDialog } from "./generated-image-error-dialog";
 import { ScanPayCard } from "@/components/chat/scan-pay-card";
 import { payWithWalletBalance } from "@/lib/wallet-storage";
@@ -1175,14 +1176,24 @@ function GeneratedImagePromptDialog({
     onConfirm,
     busy,
     error,
+    characterId,
 }: {
     value: string;
     onChange: (value: string) => void;
     onCancel: () => void;
-    onConfirm: () => void;
+    onConfirm: (options: { providerId?: string; model?: string }) => void;
     busy: boolean;
     error?: string;
+    characterId?: string;
 }) {
+    const imageSettings = useMemo(() => loadImageGenerationSettings(), []);
+    const boundProviderId = characterId ? imageSettings.characterProviderBindings[characterId] : undefined;
+    const initialProvider = imageSettings.providers.find(item => item.id === boundProviderId)
+        ?? imageSettings.providers.find(item => item.id === imageSettings.activeProviderId)
+        ?? imageSettings.providers[0];
+    const [providerId, setProviderId] = useState(initialProvider?.id || "");
+    const provider = imageSettings.providers.find(item => item.id === providerId) ?? initialProvider;
+    const [model, setModel] = useState(provider?.model || "");
     return (
         <div
             className="modal-overlay"
@@ -1209,6 +1220,21 @@ function GeneratedImagePromptDialog({
                         placeholder="输入图片提示词"
                         disabled={busy}
                     />
+                    {imageSettings.providers.length > 0 && (
+                        <div className="grid grid-cols-2 gap-2 mt-3">
+                            <select className="ui-input" aria-label="本次生图服务" value={providerId} onChange={event => {
+                                const nextId = event.target.value;
+                                const next = imageSettings.providers.find(item => item.id === nextId);
+                                setProviderId(nextId);
+                                setModel(next?.model || "");
+                            }}>
+                                {imageSettings.providers.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+                            </select>
+                            <select className="ui-input" aria-label="本次生图模型" value={model} onChange={event => setModel(event.target.value)}>
+                                {Array.from(new Set([provider?.model, ...(provider?.models || [])].filter(Boolean))).map(item => <option key={item} value={item}>{item}</option>)}
+                            </select>
+                        </div>
+                    )}
                     {error && <div className="chat-generated-image-retry-error">{error}</div>}
                 </div>
                 <div className="modal-footer" data-ui="modal-footer">
@@ -1216,7 +1242,7 @@ function GeneratedImagePromptDialog({
                     <button
                         className="ui-btn ui-btn-action"
                         disabled={busy || !value.trim()}
-                        onClick={onConfirm}
+                        onClick={() => onConfirm({ providerId: providerId || undefined, model: model || undefined })}
                     >
                         生成
                     </button>
@@ -1272,7 +1298,7 @@ function ImageBubble({
         setShowPromptEditor(true);
     }, [d?.label]);
 
-    const handleRetry = useCallback(() => {
+    const handleRetry = useCallback((generationOptions: { providerId?: string; model?: string }) => {
         const nextDescription = promptDraft.trim();
         if (!nextDescription) {
             setRetryError("提示词不能为空");
@@ -1281,7 +1307,7 @@ function ImageBubble({
         setShowPromptEditor(false);
         setRegenerating(true);
         setRetryError("");
-        retryChatGeneratedImage(msg, characterId, nextDescription)
+        retryChatGeneratedImage(msg, characterId, nextDescription, generationOptions)
             .then(updated => {
                 onUpdate?.(updated);
             })
@@ -1301,6 +1327,8 @@ function ImageBubble({
                     imageUrl={resolvedUrl || undefined}
                     description={!resolvedUrl ? label : undefined}
                     saveFilename={resolvedUrl ? ensureExtension(label, "image") : undefined}
+                    albumCharacterId={characterId}
+                    albumTitle={label}
                     onRegenerate={canRegenerate ? () => { setShowPreview(false); openPromptEditor(); } : undefined}
                     regenerating={regenerating}
                     onClose={() => setShowPreview(false)}
@@ -1314,6 +1342,7 @@ function ImageBubble({
                     onCancel={() => setShowPromptEditor(false)}
                     busy={regenerating}
                     error={retryError}
+                    characterId={characterId}
                 />,
                 document.body,
             )}
@@ -1804,6 +1833,7 @@ export function MediaImageWithPreview({
     onError,
     onRegenerate,
     regenerating,
+    albumCharacterId,
 }: {
     url: string;
     title: string;
@@ -1811,6 +1841,7 @@ export function MediaImageWithPreview({
     onError?: () => void;
     onRegenerate?: () => void;
     regenerating?: boolean;
+    albumCharacterId?: string;
 }) {
     const [preview, setPreview] = useState(false);
     const saveName = filename || title;
@@ -1826,6 +1857,8 @@ export function MediaImageWithPreview({
                 <MediaPreviewOverlay
                     imageUrl={url}
                     saveFilename={ensureExtension(saveName, "image")}
+                    albumCharacterId={albumCharacterId}
+                    albumTitle={title || saveName}
                     onRegenerate={onRegenerate ? () => { setPreview(false); onRegenerate(); } : undefined}
                     regenerating={regenerating}
                     onClose={() => setPreview(false)}
@@ -1923,7 +1956,7 @@ function MediaFileBubble({
         setShowImagePromptEditor(true);
     }, [msg.mediaData?.label]);
 
-    const handleRegenerateImage = useCallback(() => {
+    const handleRegenerateImage = useCallback((generationOptions: { providerId?: string; model?: string }) => {
         const nextDescription = imagePromptDraft.trim();
         if (!nextDescription) {
             setImageRetryError("提示词不能为空");
@@ -1932,7 +1965,7 @@ function MediaFileBubble({
         setShowImagePromptEditor(false);
         setImageRegenerating(true);
         setImageRetryError("");
-        retryChatGeneratedImage(msg, characterId, nextDescription)
+        retryChatGeneratedImage(msg, characterId, nextDescription, generationOptions)
             .then(updated => {
                 onUpdate?.(updated);
             })
@@ -2050,6 +2083,7 @@ function MediaFileBubble({
                         filename={title}
                         onRegenerate={canRegenerateImage ? openImagePromptEditor : undefined}
                         regenerating={imageRegenerating}
+                        albumCharacterId={characterId}
                     />
                     {imageRegenPending && (
                         <div className="chat-generated-image-regen-badge" aria-hidden="true">
@@ -2066,6 +2100,7 @@ function MediaFileBubble({
                         onCancel={() => setShowImagePromptEditor(false)}
                         busy={imageRegenerating}
                         error={imageRetryError}
+                        characterId={characterId}
                     />,
                     document.body,
                 )}

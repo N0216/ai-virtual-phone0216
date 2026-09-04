@@ -161,8 +161,30 @@ export type ImageHostingSettings = {
     allowMascotUpload: boolean;
 };
 
+export type ImageGenerationProviderConfig = {
+    id: string;
+    name: string;
+    requestMode: ImageGenerationRequestMode;
+    apiKey: string;
+    baseUrl: string;
+    model: string;
+    models: string[];
+    size: string;
+    quality: string;
+    extraPrompt: string;
+    createdAt: number;
+    updatedAt: number;
+};
+
 export type ImageGenerationSettings = {
     enabled: boolean;
+    /** 多服务商档案；旧版单配置会自动迁移为第一项。 */
+    providers: ImageGenerationProviderConfig[];
+    /** 未指定角色专用服务商时使用的全局默认项。 */
+    activeProviderId: string;
+    /** characterId -> providerId。只影响该角色的自动生图。 */
+    characterProviderBindings: Record<string, string>;
+    /** 以下字段是当前服务商的兼容镜像，供旧调用路径继续使用。 */
     requestMode: ImageGenerationRequestMode;
     apiKey: string;
     baseUrl: string;
@@ -224,11 +246,22 @@ export type BindingSlot = {
     regexIds?: string[];
 };
 
+/**
+ * Character-level model split for proactive/offline wake-ups.
+ * The collector may read tools and cloud context, but its prose is never shown;
+ * the writer is the only model allowed to create the visible chat message.
+ */
+export type AutoWakeModelBinding = {
+    writerApiConfigId?: string;
+    toolApiConfigId?: string;
+};
+
 // Character binding: character defaults + per-app overrides
 export type CharacterBinding = {
     characterId: string;
     defaults: BindingSlot;
     appOverrides: Partial<Record<string, BindingSlot>>;
+    autoWake?: AutoWakeModelBinding;
 };
 
 // Overall binding configuration

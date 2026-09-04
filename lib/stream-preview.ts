@@ -16,10 +16,10 @@ export function cleanStreamText(raw: string): string {
     let text = raw;
     // 成对富媒体块整块剥掉
     text = text.replace(/\[状态栏\][\s\S]*?\[\/状态栏\]/gi, "");
-    text = text.replace(/\[内心\][\s\S]*?\[\/内心\]/gi, "");
+    text = text.replace(/\[(?:内心|内心独白|心声)\][\s\S]*?\[\/(?:内心|内心独白|心声)\]/gi, "");
     // 单边开标签（还没闭合）也剥掉，避免预览里露出协议残片
-    text = text.replace(/\[状态栏\][\s\S]*?$/gi, "");
-    text = text.replace(/\[内心\][\s\S]*?$/gi, "");
+    text = text.replace(/\[状态栏\]\s*[\s\S]*?(?=\n\s*\n|$)/gi, "");
+    text = text.replace(/\[(?:内心|内心独白|心声)\]\s*[\s\S]*?(?=\n\s*\n|$)/gi, "");
     // 工具指令参数允许嵌套数组、括号及字符串里的 ]，复用项目统一解析器，不能用 [^]] 截断。
     text = stripTextToolDirectives(text);
     const incompleteTool = text.match(TOOL_DIRECTIVE_START_RE);

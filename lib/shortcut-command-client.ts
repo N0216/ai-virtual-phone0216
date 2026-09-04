@@ -160,6 +160,22 @@ export async function deliverShortcutCommand(
   return { delivered: data.delivered, push: data.push, email: data.email };
 }
 
+export async function cancelShortcutCommand(commandId: string): Promise<void> {
+  if (personalCommandIds.has(commandId)) {
+    await parseApiResponse(await personalPushFetch("shortcut-cancel", {
+      method: "POST",
+      body: JSON.stringify({ commandId }),
+    }));
+    return;
+  }
+  await parseApiResponse(await fetch("/api/push/shortcut-commands", {
+    method: "DELETE",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id: commandId }),
+  }));
+}
+
 export async function waitForShortcutCommand(
   commandId: string,
   expiresAt: string,

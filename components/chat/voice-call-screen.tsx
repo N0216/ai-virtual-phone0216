@@ -21,6 +21,9 @@ import { CallSttWarningDialog, hideCallSttWarningPermanently, isCallSttWarningHi
 import { isAndroidBrowser, isIOSDevice } from "./voice-input-platform";
 import { CallVolumeControl } from "./call-volume-control";
 import { startIncomingCallVibration } from "@/lib/call-vibration";
+import { NoirVoiceCallView } from "./noir-voice-call-view";
+import { pinyin } from "pinyin-pro";
+import { LocalCallRecordWriter } from "@/lib/call-record-storage";
 
 // ── Types ───────────────────────────────────────────
 
@@ -36,6 +39,7 @@ type SubtitleEntry = {
     id: string;
     role: "user" | "assistant";
     text: string;
+    createdAt: string;
 };
 
 type VoiceCallScreenProps = {
@@ -51,6 +55,105 @@ function stripBilingualForSpeech(text: string): string {
         .split("\n")
         .map(line => splitBilingualText(line)?.original || line)
         .join("\n");
+}
+
+function createTransientCallMessage(sessionId: string, role: "user" | "assistant", content: string): ChatMessage {
+    return {
+        id: `voice-call-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        sessionId,
+        role,
+        content,
+        status: "sent",
+        createdAt: new Date().toISOString(),
+    };
+}
+
+const CALL_LANGUAGE_LABELS: Record<string, string> = {
+    auto: "跟随用户本轮使用的语言",
+    "zh-CN": "简体中文",
+    "zh-TW": "繁体中文",
+    en: "英语",
+    ja: "日语",
+    ko: "韩语",
+    fr: "法语",
+    de: "德语",
+    es: "西班牙语",
+    ru: "俄语",
+};
+
+function resolveCustomLanguage(value: string): string {
+    return value.startsWith("custom:") ? value.slice("custom:".length).trim() : value;
+}
+
+function createCallLanguageDirective(session: ChatSession): ChatMessage {
+    const primary = session.voiceCallLanguage || "auto";
+    const translated = session.voiceCallTranslationLanguage ?? "zh-CN";
+    const resolvedPrimary = resolveCustomLanguage(primary);
+    const resolvedTranslation = resolveCustomLanguage(translated);
+    const primaryInstruction = primary === "auto"
+        ? "主要对白自然跟随用户本轮使用的语言"
+        : `主要对白固定使用${CALL_LANGUAGE_LABELS[primary] || resolvedPrimary || "用户自定义语言"}`;
+    const translationInstruction = translated === "none"
+        ? "只输出主要对白，不要附加翻译"
+        : `同时附加${CALL_LANGUAGE_LABELS[translated] || resolvedTranslation || "用户自定义语言"}译文；严格使用“主要对白 | 译文”的单行格式，两种语言表达相同内容`;
+    return {
+        ...createTransientCallMessage(session.id, "user", ""),
+        role: "system",
+        content: `[本次语音通话语言要求：${primaryInstruction}；${translationInstruction}。]`,
+    };
+}
+
+function resolveCallRecognitionLanguage(session: ChatSession): string {
+    const selected = session.voiceCallLanguage || "auto";
+    return selected === "auto" ? "zh-CN" : resolveCustomLanguage(selected) || "zh-CN";
+}
+
+function resolveLatinCallName(characterName: string, session: ChatSession): string {
+    const appearance = session.voiceCallAppearance;
+    if (appearance?.showLatinName === false) return characterName;
+    if (appearance?.latinName?.trim()) return appearance.latinName.trim();
+    if (!/[\u3400-\u9fff]/.test(characterName)) return characterName;
+    try {
+        return pinyin(characterName, { toneType: "none", type: "array" })
+            .map(part => part ? part.charAt(0).toUpperCase() + part.slice(1) : part)
+            .join(" ");
+    } catch {
+        return characterName;
+    }
+}
+
+async function decodeVoiceEnvelope(blob: Blob): Promise<{ levels: number[]; duration: number } | null> {
+    if (typeof window === "undefined") return null;
+    const AudioContextCtor = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextCtor) return null;
+    const context = new AudioContextCtor();
+    try {
+        const buffer = await context.decodeAudioData(await blob.arrayBuffer());
+        const channel = buffer.getChannelData(0);
+        const frameCount = Math.max(12, Math.ceil(buffer.duration * 20));
+        const frameSize = Math.max(1, Math.floor(channel.length / frameCount));
+        const raw: number[] = [];
+        for (let frame = 0; frame < frameCount; frame += 1) {
+            const start = frame * frameSize;
+            const end = Math.min(channel.length, start + frameSize);
+            let sum = 0;
+            for (let index = start; index < end; index += 1) sum += channel[index] * channel[index];
+            raw.push(Math.sqrt(sum / Math.max(1, end - start)));
+        }
+        const sorted = [...raw].sort((a, b) => a - b);
+        const ceiling = sorted[Math.floor(sorted.length * 0.92)] || 0.01;
+        let previous = 0;
+        const levels = raw.map(value => {
+            const normalized = Math.min(1, value / Math.max(0.01, ceiling));
+            previous = previous * 0.58 + normalized * 0.42;
+            return previous;
+        });
+        return { levels, duration: buffer.duration };
+    } catch {
+        return null;
+    } finally {
+        void context.close().catch(() => {});
+    }
 }
 
 // ── Component ───────────────────────────────────────
@@ -79,6 +182,11 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
     const [typedText, setTypedText] = useState("");
     const [bgImageResolved, setBgImageResolved] = useState<string | null>(null);
     const [showSttWarning, setShowSttWarning] = useState(false);
+    const [voiceLevel, setVoiceLevel] = useState(0);
+    const [captionRevealMs, setCaptionRevealMs] = useState(900);
+    const subtitlesRef = useRef<SubtitleEntry[]>([]);
+    const callRecordWriterRef = useRef<LocalCallRecordWriter | null>(null);
+    const endingRef = useRef(false);
 
     const sttRef = useRef<STTSession | null>(null);
     const audioAbortRef = useRef<(() => void) | null>(null);
@@ -89,11 +197,34 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
     const sttWarningShownRef = useRef(false);
     const subtitleScrollRef = useRef<HTMLDivElement>(null);
     const messagesRef = useRef<ChatMessage[]>([]);
+    const latestStateValuesRef = useRef<StateValue[]>([]);
+    const latestFreshStateValuesRef = useRef<StateValue[]>([]);
+    const envelopeTimerRef = useRef<number | null>(null);
     const _initUi = resolveUserIdentity(session.contactId, "chat");
     const userNameRef = useRef<string>(_initUi?.name || "你");
 
     // Keep refs in sync
     useEffect(() => { stateRef.current = callState; }, [callState]);
+    useEffect(() => { subtitlesRef.current = subtitles; }, [subtitles]);
+    const appendSubtitle = useCallback((entry: SubtitleEntry) => {
+        // 同步更新 ref，避免用户在 React 提交 state 前立即挂断时漏掉最后一句。
+        subtitlesRef.current = [...subtitlesRef.current, entry];
+        setSubtitles(subtitlesRef.current);
+        callRecordWriterRef.current?.updateTranscript(subtitlesRef.current.map(item => ({
+            id: item.id,
+            role: item.role,
+            content: item.text,
+            createdAt: item.createdAt,
+        })));
+    }, []);
+    const checkpointCallRecord = useCallback((interim = interimTextRef.current) => {
+        callRecordWriterRef.current?.checkpointTranscript(subtitlesRef.current.map(item => ({
+            id: item.id,
+            role: item.role,
+            content: item.text,
+            createdAt: item.createdAt,
+        })), interim);
+    }, []);
 
     // 来电等待接听：循环振动（开关在聊天主页，iOS 网页不支持自动无效果）
     useEffect(() => {
@@ -115,12 +246,13 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
     useEffect(() => {
         setCallAudioSessionActive(true);
         return () => {
+            checkpointCallRecord();
             stateRef.current = "ENDED";
             if (sttRef.current) { sttRef.current.abort(); sttRef.current = null; }
             if (audioAbortRef.current) { audioAbortRef.current(); audioAbortRef.current = null; }
             setCallAudioSessionActive(false);
         };
-    }, []);
+    }, [checkpointCallRecord]);
     useEffect(() => { interimTextRef.current = interimText; }, [interimText]);
 
     const showSttCompatibilityWarning = useCallback(() => {
@@ -197,7 +329,8 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
         // Insert system message (skip if already exists from strict mode remount)
         const lastMsg = messagesRef.current[messagesRef.current.length - 1];
         const initRole = initiator === "character" ? "assistant" : "user";
-        if (!lastMsg || !(lastMsg.content.includes("发起了语音通话"))) {
+        let startMsg = lastMsg?.content.includes("发起了语音通话") ? lastMsg : null;
+        if (!startMsg) {
             const callMsg = initiator === "character"
                 ? `[我向${userNameRef.current}发起了语音通话]`
                 : `[我向${character.name}发起了语音通话]`;
@@ -207,7 +340,16 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                 content: callMsg,
             });
             messagesRef.current = [...messagesRef.current, sysMsg];
+            startMsg = sysMsg;
         }
+        callRecordWriterRef.current = new LocalCallRecordWriter({
+            id: `call_${startMsg.id}`,
+            sessionId: session.id,
+            type: "voice",
+            initiatorRole: initRole === "assistant" ? "assistant" : "user",
+            startedAt: startMsg.createdAt,
+            legacyStartMessageId: startMsg.id,
+        });
 
         // User-initiated: auto-connect after 3s fake dial
         // Character-initiated: wait for user to accept
@@ -229,8 +371,9 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
     useEffect(() => {
         if (callState !== "CONNECTING" && !hasConnectedRef.current) {
             hasConnectedRef.current = true;
+            onConnect?.();
         }
-    }, [callState]);
+    }, [callState, onConnect]);
 
     // ── Format time MM:SS ───────────────────────────
 
@@ -266,24 +409,20 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
             !p.mediaType || !["voice_call", "video_call", "poke", "accept_red_packet", "decline_red_packet", "accept_transfer", "decline_transfer", "accept_payment_request", "decline_payment_request"].includes(p.mediaType)
         );
 
-        // Save messages to storage
+        latestStateValuesRef.current = stateValues;
+        latestFreshStateValuesRef.current = freshStateValues;
+
+        // 通话正文只进入本次通话的临时上下文，不写入普通聊天记录。
         if (chatParts.length === 0 && (statusPanel || innerMonologue)) {
-            const aiMsg = pushChatMessage({
-                sessionId: session.id,
-                role: "assistant",
-                content: "",
-                statusPanel,
-                innerMonologue,
-                stateValues: stateValues.length > 0 ? stateValues : undefined,
-                freshStateValues,
-            });
+            const aiMsg = createTransientCallMessage(session.id, "assistant", "");
+            aiMsg.statusPanel = statusPanel;
+            aiMsg.innerMonologue = innerMonologue;
+            aiMsg.stateValues = stateValues.length > 0 ? stateValues : undefined;
+            aiMsg.freshStateValues = freshStateValues;
             messagesRef.current = [...messagesRef.current, aiMsg];
         } else {
             const newMsgs = chatParts.map((part, idx) =>
-                pushChatMessage({
-                    sessionId: session.id,
-                    role: "assistant",
-                    content: part.content,
+                Object.assign(createTransientCallMessage(session.id, "assistant", part.content), {
                     mediaType: part.mediaType,
                     mediaData: part.mediaData,
                     statusPanel: idx === 0 && statusPanel ? statusPanel : undefined,
@@ -306,26 +445,23 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
     // ── Full conversation turn ──────────────────────
 
     const runConversationTurn = useCallback(async (userText?: string) => {
-        // 1. Save user message (skip for initial greeting)
+        // 1. Add user utterance to this call's private context (skip for initial greeting)
         if (userText) {
-            const userMsg = pushChatMessage({
-                sessionId: session.id,
-                role: "user",
-                content: userText,
-            });
+            const userMsg = createTransientCallMessage(session.id, "user", userText);
             messagesRef.current = [...messagesRef.current, userMsg];
 
             // Add user subtitle
-            setSubtitles(prev => [...prev, { id: userMsg.id, role: "user", text: userText }]);
+            appendSubtitle({ id: userMsg.id, role: "user", text: userText, createdAt: userMsg.createdAt });
         }
 
         // 2. Switch to PROCESSING
         setCallState("PROCESSING");
         setInterimText("");
+        interimTextRef.current = "";
 
         try {
             // 3. Generate AI response
-            const aiResponseText = flattenCompletionResult(await generateChatCompletion(session, messagesRef.current, {
+            const aiResponseText = flattenCompletionResult(await generateChatCompletion(session, [...messagesRef.current, createCallLanguageDirective(session)], {
                 appTags: ["chat", "voice"],
             }));
 
@@ -342,9 +478,16 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                 return;
             }
 
-            // 5. Add AI subtitle
+            // 5. Prepare AI subtitle. It is mounted immediately before audio starts,
+            // so the left-to-right reveal follows the spoken line instead of finishing
+            // while the TTS request is still loading.
             const subtitleId = `ai-${Date.now()}`;
-            setSubtitles(prev => [...prev, { id: subtitleId, role: "assistant", text: displayText }]);
+            let subtitleShown = false;
+            const showAssistantSubtitle = () => {
+                if (subtitleShown) return;
+                subtitleShown = true;
+                appendSubtitle({ id: subtitleId, role: "assistant", text: displayText, createdAt: new Date().toISOString() });
+            };
 
             // 6. TTS
             setCallState("AI_SPEAKING");
@@ -356,15 +499,35 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                     if (stateRef.current === "ENDED") return;
 
                     if (audioBlob) {
+                        const envelope = await decodeVoiceEnvelope(audioBlob);
+                        if (envelope) setCaptionRevealMs(Math.max(700, Math.round(envelope.duration * 1000 * 0.92)));
+                        showAssistantSubtitle();
                         const { promise, abort } = playCallAudio(audioBlob);
                         audioAbortRef.current = abort;
+                        const startedAt = performance.now();
+                        if (envelope?.levels.length) {
+                            envelopeTimerRef.current = window.setInterval(() => {
+                                const elapsed = (performance.now() - startedAt) / 1000;
+                                const index = Math.min(
+                                    envelope.levels.length - 1,
+                                    Math.floor((elapsed / Math.max(0.01, envelope.duration)) * envelope.levels.length),
+                                );
+                                setVoiceLevel(envelope.levels[index] || 0);
+                            }, 50);
+                        }
                         await promise;
+                        if (envelopeTimerRef.current !== null) {
+                            window.clearInterval(envelopeTimerRef.current);
+                            envelopeTimerRef.current = null;
+                        }
+                        setVoiceLevel(0);
                         audioAbortRef.current = null;
                     }
                 } catch (e) {
                     console.warn("[VoiceCall] TTS failed:", e);
                 }
             }
+            showAssistantSubtitle();
 
             if (stateRef.current !== "ENDED") {
                 setCallState("IDLE");
@@ -372,15 +535,16 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
         } catch (error: any) {
             console.error("[VoiceCall] Error:", error);
             if (stateRef.current !== "ENDED") {
-                setSubtitles(prev => [...prev, {
+                appendSubtitle({
                     id: `err-${Date.now()}`,
                     role: "assistant",
                     text: `⚠️ ${error?.message || "发送失败"}`,
-                }]);
+                    createdAt: new Date().toISOString(),
+                });
                 setCallState("IDLE");
             }
         }
-    }, [session, processAIResponse, playCallAudio]);
+    }, [session, processAIResponse, playCallAudio, appendSubtitle]);
 
     // ── Auto-listen: 进入 IDLE 自动开始监听 ────────
 
@@ -401,6 +565,7 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
             onInterim: (text) => {
                 setInterimText(text);
                 interimTextRef.current = text;
+                checkpointCallRecord(text);
                 // 有中间结果 → 切到 USER_SPEAKING
                 if (stateRef.current === "IDLE") {
                     setCallState("USER_SPEAKING");
@@ -451,7 +616,7 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                     }
                 }
             },
-        }, "zh-CN");
+        }, resolveCallRecognitionLanguage(session));
 
         sttRef.current = stt;
 
@@ -461,7 +626,7 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
             sttRef.current = null;
             showSttCompatibilityWarning();
         }
-    }, [androidTextInputOnly, holdToTalk, runConversationTurn, session.contactId, showSttCompatibilityWarning]);
+    }, [androidTextInputOnly, checkpointCallRecord, holdToTalk, runConversationTurn, session.contactId, showSttCompatibilityWarning]);
 
     // IDLE 时自动开启监听（按住说话模式无自动监听，识别只在按住期间发生）
     useEffect(() => {
@@ -543,8 +708,11 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
 
     // ── Hangup ──────────────────────────────────────
 
-    const handleHangup = useCallback(() => {
+    const handleHangup = useCallback(async () => {
+        if (endingRef.current) return;
+        endingRef.current = true;
         setCallState("ENDED");
+        checkpointCallRecord();
 
         // Stop any ongoing STT
         if (sttRef.current) {
@@ -557,6 +725,11 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
             audioAbortRef.current();
             audioAbortRef.current = null;
         }
+        if (envelopeTimerRef.current !== null) {
+            window.clearInterval(envelopeTimerRef.current);
+            envelopeTimerRef.current = null;
+        }
+        setVoiceLevel(0);
 
         // Stop browser TTS
         if (window.speechSynthesis) {
@@ -567,16 +740,99 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
             sessionId: session.id,
             role: "user",
             content: `[我挂断了语音通话]`,
-            mediaData: { callDuration: formatTime(callDuration) },
+            mediaData: {
+                callDuration: formatTime(callDuration),
+                callTranscript: subtitlesRef.current
+                    .filter(item => item.text.trim() && !item.text.trim().startsWith("⚠️"))
+                    .map(item => ({ id: item.id, role: item.role, content: item.text, createdAt: item.createdAt })),
+            },
+            stateValues: latestStateValuesRef.current.length > 0 ? latestStateValuesRef.current : undefined,
+            freshStateValues: latestFreshStateValuesRef.current,
         });
         messagesRef.current = [...messagesRef.current, endMsg];
 
-        // Delay then close
-        setTimeout(() => onEnd(), 1500);
-    }, [session.id, callDuration, onEnd]);
+        try {
+            await callRecordWriterRef.current?.finalize("ended", formatTime(callDuration), {
+                endedAt: endMsg.createdAt,
+                legacyEndMessageId: endMsg.id,
+            });
+        } catch (error) {
+            console.warn("[VoiceCall] failed to finalize local call record:", error);
+        }
+
+        // 像真实电话一样：挂断后立即回到通话前的聊天界面。
+        onEnd();
+    }, [session.id, callDuration, onEnd, checkpointCallRecord]);
+
+    const finishUnconnectedCall = useCallback(async (
+        state: "cancelled" | "rejected",
+        content: string,
+    ) => {
+        if (endingRef.current) return;
+        endingRef.current = true;
+        const endMsg = pushChatMessage({ sessionId: session.id, role: "user", content });
+        try {
+            await callRecordWriterRef.current?.finalize(state, "00:00", {
+                endedAt: endMsg.createdAt,
+                legacyEndMessageId: endMsg.id,
+            });
+        } catch (error) {
+            console.warn("[VoiceCall] failed to finalize unanswered call record:", error);
+        }
+        onEnd();
+    }, [onEnd, session.id]);
 
     // ── Render ──────────────────────────────────────
 
+    const voiceConfigForDisplay = resolveVoiceConfig(session.contactId);
+    const modelName = voiceConfigForDisplay?.model || voiceConfigForDisplay?.provider || "VOICE";
+    const callAppearance = session.voiceCallAppearance || {};
+    const useNoirAppearance = callAppearance.visualStyle !== "original";
+    const warningDialog = !androidTextInputOnly && showSttWarning ? (
+        <CallSttWarningDialog
+            onClose={() => setShowSttWarning(false)}
+            onNeverShow={handleNeverShowSttWarning}
+        />
+    ) : null;
+
+    if (useNoirAppearance) return (
+        <>
+            <CallVolumeControl />
+            <NoirVoiceCallView
+                callState={callState}
+                initiator={initiator}
+                characterName={character.name}
+                displayName={resolveLatinCallName(character.name, session)}
+                modelName={modelName}
+                captionFont={callAppearance.captionFont || "serif"}
+                orbTone={callAppearance.orbTone || "mist"}
+                duration={formatTime(callDuration)}
+                backgroundImage={bgImageResolved}
+                keyboardOffsetStyle={keyboardOffsetStyle}
+                subtitles={subtitles}
+                interimText={interimText}
+                voiceLevel={voiceLevel}
+                captionRevealMs={captionRevealMs}
+                isMuted={isMuted}
+                inputMode={inputMode}
+                typedText={typedText}
+                canUseVoice={!androidTextInputOnly}
+                canSendText={callState === "IDLE"}
+                warning={warningDialog}
+                onTypedTextChange={setTypedText}
+                onSubmitText={handleTextSubmit}
+                onToggleInput={handleInputModeToggle}
+                onToggleMute={() => setIsMuted(value => !value)}
+                onHangup={handleHangup}
+                onAccept={() => setCallState("IDLE")}
+                onDecline={() => { void finishUnconnectedCall("rejected", `[我拒绝了语音通话]`); }}
+                onCancel={() => { void finishUnconnectedCall("cancelled", `[我取消了语音通话]`); }}
+                holdToTalk={holdToTalk}
+            />
+        </>
+    );
+
+    /* 保留旧版结构作为回滚参考；新语音界面上方已经返回。 */
     return (
         <div
             className="absolute inset-0 z-[100] flex flex-col text-white overflow-hidden call-bg-default call-keyboard-shift"
@@ -615,7 +871,7 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                         >
                             {character.avatar ? (
                                 <img
-                                    src={character.avatar}
+                                    src={character.avatar || undefined}
                                     alt={character.name}
                                     className="w-full h-full object-cover"
                                 />
@@ -851,14 +1107,7 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                         /* Incoming call: accept + decline */
                         <>
                             <button
-                                onClick={() => {
-                                    pushChatMessage({
-                                        sessionId: session.id,
-                                        role: "user",
-                                        content: `[我拒绝了语音通话]`,
-                                    });
-                                    onEnd();
-                                }}
+                                onClick={() => { void finishUnconnectedCall("rejected", `[我拒绝了语音通话]`); }}
                                 className="ui-call-btn ui-call-btn-danger"
                             >
                                 <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -879,14 +1128,7 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                     ) : callState === "CONNECTING" ? (
                         /* User-initiated: show cancel only */
                         <button
-                            onClick={() => {
-                                pushChatMessage({
-                                    sessionId: session.id,
-                                    role: "user",
-                                    content: `[我取消了语音通话]`,
-                                });
-                                onEnd();
-                            }}
+                            onClick={() => { void finishUnconnectedCall("cancelled", `[我取消了语音通话]`); }}
                             className="ui-call-btn ui-call-btn-danger"
                         >
                             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

@@ -20,14 +20,17 @@ import {
     saveRestToolPackages,
     expandToolNameMacros,
     findEnabledToolForSchema,
+    getEnabledTools,
     resolvedToolPermissionKey,
     toolNameMatches,
 } from "./tool-storage";
 import { executeCustomAppToolCall } from "./custom-app-tool-runtime";
 import { characterWorkspace, agentComputerRequest, isAgentComputerConfigured } from "./agent-computer";
-import { AGENT_COMPUTER_CAPABILITY_ID, CALENDAR_MANAGEMENT_CAPABILITY_ID, LOCAL_DATA_LIBRARY_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID, MUSIC_CONTROL_CAPABILITY_ID, NOTE_WALL_CAPABILITY_ID, REALITY_BRIDGE_CAPABILITY_ID, SEND_FILE_CAPABILITY_ID, TIMED_WAKE_CAPABILITY_ID, TOOLBOX_MANAGEMENT_CAPABILITY_ID, getInternalCapability } from "./internal-capability-storage";
+import { AGENT_COMPUTER_CAPABILITY_ID, CALENDAR_MANAGEMENT_CAPABILITY_ID, LOCAL_DATA_LIBRARY_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID, MUSIC_CONTROL_CAPABILITY_ID, NOTE_WALL_CAPABILITY_ID, PHONE_INTERACTION_READ_CAPABILITY_ID, PHONE_MANAGEMENT_CAPABILITY_ID, PHONE_SETTINGS_WRITE_CAPABILITY_ID, REALITY_BRIDGE_CAPABILITY_ID, SEND_FILE_CAPABILITY_ID, TIMED_WAKE_CAPABILITY_ID, TOOLBOX_MANAGEMENT_CAPABILITY_ID, getInternalCapability } from "./internal-capability-storage";
+import { changePhoneManagementSettings, queryPhoneManagementState, undoPhoneManagementSettings } from "./phone-management-tools";
+import { listReadablePhoneInteractions, readPhoneCallHistory, readRecentPhoneChat } from "./phone-interaction-tools";
 import { bridgeConnection, loadBridgeDataItems, loadBridgeShortcutActions, readAllBridgeStateSnapshots, readBridgeStateSnapshot } from "./reality-bridge/storage";
-import { createShortcutCommand, deliverShortcutCommand, waitForShortcutCommand } from "./shortcut-command-client";
+import { cancelShortcutCommand, createShortcutCommand, deliverShortcutCommand, waitForShortcutCommand } from "./shortcut-command-client";
 import { loadMemoryEntriesByType, saveMemoryEntry } from "./memory-storage";
 import type { MemoryEntry } from "./memory-types";
 import { loadCharacters } from "./character-storage";
@@ -83,6 +86,18 @@ import {
     deleteShortcutCommandMediaUrl,
     registerShortcutCommandMediaCleanup,
 } from "./shortcut-command-media-client";
+import { finishDeviceOperation, loadDeviceOperationLogs, startDeviceOperation, summarizeOperationResult } from "./device-operation-log";
+import {
+    USER_VIEW_READ_CAPABILITY_ID,
+    findUserViewReadRegistration,
+    isBroadLocalDataScopeContainingRolePhone,
+    isAlwaysForbiddenExecutionAssistantToolName,
+    isRolePhoneLocalDataPath,
+    isRolePhoneReference,
+    isRolePhoneUserViewReadCallDenied,
+    resolveUserViewReadPermission,
+    sanitizeUserViewReadResult,
+} from "./user-view-read";
 
 // ── Types ─────────────────────────────────────
 
@@ -100,8 +115,12 @@ export type ToolExecutionContext = {
     sessionId?: string;
     characterId?: string;
     characterDisplayName?: string;
-    sourceEngine?: "chat" | "group_chat" | "custom_app";
+    sourceEngine?: "chat" | "group_chat" | "custom_app" | "execution_assistant";
     toolUsage?: CharacterToolUsage;
+    actorType?: "role" | "eiren" | "deepseek" | "system";
+    taskId?: string;
+    /** Mandatory per-task allowlist for the low-privilege execution assistant. */
+    allowedToolNames?: readonly string[];
     signal?: AbortSignal;
     onShortcutCommandCreated?: (command: {
         id: string;
@@ -111,6 +130,89 @@ export type ToolExecutionContext = {
     }) => Promise<boolean>;
 };
 
+export type MobileDaddyWakeContextAccess = {
+    url: string;
+    token: string;
+};
+
+function mobileDaddyWakeContextUrl(serverUrl: string): string | null {
+    try {
+        const url = new URL(serverUrl);
+        url.pathname = url.pathname.replace(/\/mcp\/?$/u, "/wake-context");
+        if (!url.pathname.endsWith("/wake-context")) {
+            url.pathname = `${url.pathname.replace(/\/$/u, "")}/wake-context`;
+        }
+        url.search = "";
+        url.hash = "";
+        return url.toString();
+    } catch {
+        return null;
+    }
+}
+
+function configuredMcpBearerToken(server: McpServerConfig): string {
+    if (server.accessToken?.trim()) return server.accessToken.replace(/^bearer\s+/iu, "").trim();
+    const authorization = Object.entries(server.headers || {})
+        .find(([name]) => name.toLowerCase() === "authorization")?.[1];
+    return authorization?.replace(/^bearer\s+/iu, "").trim() || "";
+}
+
+export function getMobileDaddyWakeContextAccess(characterId: string): MobileDaddyWakeContextAccess | null {
+    const permittedGroups = getEnabledTools("chat", characterId, "auto_wake");
+    const group = permittedGroups.find(tool => (
+        tool.source === "mcp_server"
+        && tool.mcpTools?.some(child => child.name === "execute_memory_operation")
+    ));
+    if (!group) return null;
+    const server = loadMcpServers().find(item => item.id === group.sourceId && item.enabled);
+    if (!server) return null;
+    const url = mobileDaddyWakeContextUrl(server.url);
+    const token = configuredMcpBearerToken(server);
+    return url && token ? { url, token } : null;
+}
+
+export async function readMobileDaddyWakeContextForAutoWake(
+    characterId: string,
+    signal?: AbortSignal,
+): Promise<string> {
+    const access = getMobileDaddyWakeContextAccess(characterId);
+    if (!access) return "";
+    try {
+        const server = loadMcpServers().find(item => (
+            item.enabled && mobileDaddyWakeContextUrl(item.url) === access.url
+        ));
+        const url = new URL(access.url);
+        url.searchParams.set("handoff_limit", "1");
+        url.searchParams.set("conversation_limit", "1");
+        url.searchParams.set("message_limit", "30");
+        const headers = { Authorization: `Bearer ${access.token}`, Accept: "application/json" };
+        let status: number;
+        let data: unknown;
+        if (server?.directFetch) {
+            const response = await fetch(url, { method: "GET", headers, signal });
+            status = response.status;
+            data = await response.json().catch(() => null);
+        } else {
+            const response = await proxyFetch(url.toString(), { method: "GET", headers, signal });
+            status = response.status;
+            try { data = JSON.parse(response.text); } catch { data = null; }
+        }
+        if (status < 200 || status >= 300 || !data) {
+            return `<mobile_daddy_wake_context status="unavailable">\n最近关系与事件上下文读取失败（HTTP ${status}）。不要假装已经读取成功。\n</mobile_daddy_wake_context>`;
+        }
+        return [
+            '<mobile_daddy_wake_context status="fresh">',
+            "以下是按权限读取的最近交接与聊天原文。关系状态主要依据这些内容及相关长期记忆、允许读取的 Self Memory 综合判断；时间只辅助判断间隔和事件新旧，不能单独判断关系。",
+            JSON.stringify(data),
+            "信息不足时才继续按需检索，不要读取全部历史。",
+            "</mobile_daddy_wake_context>",
+        ].join("\n");
+    } catch (error) {
+        if (isAbortError(error)) throw error;
+        return '<mobile_daddy_wake_context status="unavailable">\n最近关系与事件上下文暂时无法读取。不要假装已经读取成功。\n</mobile_daddy_wake_context>';
+    }
+}
+
 function isSupportedChatToolContext(
     context?: ToolExecutionContext,
 ): context is ToolExecutionContext & { characterId: string } {
@@ -119,8 +221,23 @@ function isSupportedChatToolContext(
         && (
             (context.appId === "chat" && context.sourceEngine === "chat")
             || (context.appId === "group_chat" && context.sourceEngine === "group_chat")
+            || context.sourceEngine === "execution_assistant"
         ),
     );
+}
+
+function isUserViewReadGrantEnabled(): boolean {
+    const capability = getInternalCapability(USER_VIEW_READ_CAPABILITY_ID);
+    return Boolean(capability?.enabled && capability.mode !== "off");
+}
+
+function isAuthorizedEirenUserViewRead(call: ToolCall, context?: ToolExecutionContext): boolean {
+    if (context?.sourceEngine !== "execution_assistant") return false;
+    return resolveUserViewReadPermission({
+        call,
+        grantEnabled: isUserViewReadGrantEnabled(),
+        taskPermissionScope: context.allowedToolNames,
+    }).allowed;
 }
 
 export type MediaAttachment = {
@@ -448,8 +565,49 @@ export function parseToolCalls(text: string): { cleanText: string; toolCalls: To
 export async function executeToolCalls(toolCalls: ToolCall[], context?: ToolExecutionContext): Promise<ToolResult[]> {
     throwIfAborted(context?.signal);
     return Promise.all(toolCalls.map(async call => {
-        const result = await executeSingleToolCall(call, context, { depth: 0 });
-        return compactToolResultWithAssignedModel(call, result, context);
+        const userViewRegistration = context?.sourceEngine === "execution_assistant"
+            ? findUserViewReadRegistration(call)
+            : null;
+        const source = context?.sourceEngine === "execution_assistant" ? "execution_assistant"
+            : context?.toolUsage === "auto_wake" ? "auto_wake"
+                : context?.sourceEngine === "custom_app" ? "custom_app"
+                    : context?.sourceEngine === "chat" || context?.sourceEngine === "group_chat" ? "chat" : "unknown";
+        const operation = await startDeviceOperation({
+            taskId: context?.taskId,
+            actorType: context?.actorType || (context?.sourceEngine === "execution_assistant" ? "deepseek" : "role"),
+            actorId: context?.characterId,
+            actorName: context?.characterDisplayName,
+            source,
+            toolName: call.name,
+            capabilityId: userViewRegistration?.capabilityId,
+            authorizationBasis: userViewRegistration ? USER_VIEW_READ_CAPABILITY_ID : undefined,
+            argumentKeys: Object.keys(call.args || {}),
+        }).catch(() => null);
+        try {
+            const result = await executeSingleToolCall(call, context, { depth: 0 });
+            const rawCompacted = await compactToolResultWithAssignedModel(call, result, context);
+            const compacted: ToolResult = context?.sourceEngine === "execution_assistant" ? {
+                ...rawCompacted,
+                data: rawCompacted.data === undefined ? undefined : String(sanitizeUserViewReadResult(rawCompacted.data)),
+                error: rawCompacted.error === undefined ? undefined : String(sanitizeUserViewReadResult(rawCompacted.error)),
+                userNotice: rawCompacted.userNotice === undefined ? undefined : String(sanitizeUserViewReadResult(rawCompacted.userNotice)),
+                mediaAttachments: rawCompacted.mediaAttachments?.filter(item => !isRolePhoneReference(item.title || "")),
+            } : rawCompacted;
+            if (operation) await finishDeviceOperation(operation.id, {
+                status: compacted.success ? "succeeded" : (/未获授权|未启用|不支持/.test(compacted.error || "") ? "denied" : "failed"),
+                // Audit records outcome metadata only. Tool output may later be withdrawn or
+                // contain private content, so it must never become a second durable cache.
+                resultSummary: compacted.success ? summarizeOperationResult(compacted.userNotice || "执行成功（结果正文未写入审计日志）") : undefined,
+                error: compacted.error,
+            }).catch(() => undefined);
+            return compacted;
+        } catch (error) {
+            if (operation) await finishDeviceOperation(operation.id, {
+                status: isAbortError(error) ? "cancelled" : "failed",
+                error: error instanceof Error ? error.message : String(error),
+            }).catch(() => undefined);
+            throw error;
+        }
     }));
 }
 
@@ -525,10 +683,42 @@ async function executeSingleToolCall(
 ): Promise<ToolResult> {
     throwIfAborted(context?.signal);
     const nameMacroContext = buildToolNameMacroContext(context);
+    if (context?.sourceEngine === "execution_assistant") {
+        if (!context.characterId) {
+            return { name: call.name, success: false, error: "执行助理身份未配置", userNotice: "执行助理没有可用身份" };
+        }
+        if (isRolePhoneUserViewReadCallDenied(call)) {
+            return { name: call.name, success: false, error: "角色手机整体不在 Eiren / DeepSeek 的可查询范围内", userNotice: "该查询被角色手机隔离边界拒绝" };
+        }
+        if (isAlwaysForbiddenExecutionAssistantToolName(call.name)) {
+            return { name: call.name, success: false, error: "执行助理禁止执行记忆写入或扩张自身工具权限", userNotice: "该动作超出执行助理权限" };
+        }
+        if (!context.allowedToolNames?.includes(call.name)) {
+            return { name: call.name, success: false, error: "该工具不在当前任务的 permission_scope 内", userNotice: "该动作未获本任务授权" };
+        }
+        const ownerReadDecision = resolveUserViewReadPermission({
+            call,
+            grantEnabled: isUserViewReadGrantEnabled(),
+            taskPermissionScope: context.allowedToolNames,
+        });
+        if (ownerReadDecision.registration && !ownerReadDecision.allowed) {
+            const error = ownerReadDecision.reason === "grant_revoked"
+                ? "Eiren 的本人视角只读授权已撤销"
+                : ownerReadDecision.reason === "role_phone_excluded"
+                    ? "角色手机整体不在 Eiren / DeepSeek 的可查询范围内"
+                : ownerReadDecision.reason === "outside_task_scope"
+                    ? "该只读工具不在当前任务的 permission_scope 内"
+                    : "该动作不是本人视角只读操作，必须使用独立细粒度授权";
+            return { name: call.name, success: false, error, userNotice: "该查询当前未获授权" };
+        }
+        if (!ownerReadDecision.allowed && !findEnabledToolForSchema(call.name, "chat", nameMacroContext, context.characterId, "chat")) {
+            return { name: call.name, success: false, error: "执行助理身份未获角色级工具授权", userNotice: "执行助理没有使用该工具的权限" };
+        }
+    }
     if (
         hint.depth === 0
-        && context?.sourceEngine === "chat"
-        && context.appId === "chat"
+        && (context?.sourceEngine === "chat" || context?.sourceEngine === "group_chat")
+        && (context.appId === "chat" || context.appId === "group_chat")
         && context.characterId
         && !findEnabledToolForSchema(call.name, context.appId, nameMacroContext, context.characterId, context.toolUsage ?? "chat")
     ) {
@@ -856,11 +1046,14 @@ async function executeInternalTool(call: ToolCall, context?: ToolExecutionContex
     if (isNoteWallToolName(call.name)) return executeNoteWallTool(call, context);
     if (isMusicControlToolName(call.name)) return executeMusicControlTool(call, context);
     if (isCalendarToolName(call.name)) return executeCalendarTool(call, context);
-    if (isLocalDataToolName(call.name)) return executeLocalDataTool(call);
+    if (isLocalDataToolName(call.name)) return executeLocalDataTool(call, context);
     if (isToolboxManagementToolName(call.name)) return executeToolboxManagementTool(call);
     if (call.name === "发送文件") return executeSendFileTool(call);
     if (call.name === "角色电脑") return executeAgentComputerTool(call, context);
     if (isRealityBridgeToolName(call.name)) return executeRealityBridgeTool(call, context);
+    if (call.name === "查看小手机设置" || call.name === "查看设备操作日志") return executePhoneManagementTool(call, context);
+    if (call.name === "修改小手机设置" || call.name === "撤销小手机设置修改") return executePhoneSettingsWriteTool(call, context);
+    if (["列出可查看的互动", "查看最近聊天", "查看通话内容"].includes(call.name)) return executePhoneInteractionReadTool(call, context);
     if (call.name === "稍后主动联系" || call.name === "设置定时醒来") return executeTimedWakeTool(call, context);
 
     if (call.name !== "写入记忆") return null;
@@ -878,6 +1071,76 @@ async function executeInternalTool(call: ToolCall, context?: ToolExecutionContex
     }
 
     return executeMemoryWriteTool(call.args, capability, context);
+}
+
+async function executePhoneManagementTool(call: ToolCall, context?: ToolExecutionContext): Promise<ToolResult> {
+    const capability = getInternalCapability(PHONE_MANAGEMENT_CAPABILITY_ID);
+    if ((!capability || !capability.enabled || capability.mode === "off") && !isAuthorizedEirenUserViewRead(call, context)) {
+        return { name: call.name, success: false, error: "小手机设置查询能力未启用", userNotice: "小手机设置查询能力未启用" };
+    }
+    if (!isSupportedChatToolContext(context)) {
+        return { name: call.name, success: false, error: "只能由已授权的聊天角色使用小手机设置查询" };
+    }
+    if (call.name === "查看设备操作日志") {
+        const limit = Math.max(1, Math.min(100, Number(call.args.limit) || 30));
+        const status = typeof call.args.status === "string" ? call.args.status : "all";
+        const allowedStatuses = new Set(["all", "running", "succeeded", "failed", "denied", "cancelled"]);
+        if (!allowedStatuses.has(status)) return { name: call.name, success: false, error: "日志状态过滤值无效" };
+        const entries = loadDeviceOperationLogs()
+            .filter(entry => status === "all" || entry.status === status)
+            .filter(entry => !isRolePhoneReference([entry.toolName, entry.resultSummary, entry.error].filter(Boolean).join(" ")))
+            .slice(-limit).reverse()
+            .map(entry => ({
+                operationId: entry.id, taskId: entry.taskId, actorType: entry.actorType,
+                actorName: entry.actorName, source: entry.source, toolName: entry.toolName,
+                capabilityId: entry.capabilityId, authorizationBasis: entry.authorizationBasis,
+                argumentKeys: entry.argumentKeys, status: entry.status,
+                resultSummary: entry.resultSummary, error: entry.error,
+                startedAt: entry.startedAt, finishedAt: entry.finishedAt,
+            }));
+        return { name: call.name, success: true, data: JSON.stringify({ operations: entries }, null, 2), userNotice: `已读取 ${entries.length} 条脱敏设备操作日志` };
+    }
+    return queryPhoneManagementState(call.args, {
+        sessionId: context.sessionId,
+        characterId: context.characterId,
+        characterDisplayName: context.characterDisplayName,
+    });
+}
+
+async function executePhoneSettingsWriteTool(call: ToolCall, context?: ToolExecutionContext): Promise<ToolResult> {
+    const capability = getInternalCapability(PHONE_SETTINGS_WRITE_CAPABILITY_ID);
+    if (!capability || !capability.enabled || capability.mode === "off") {
+        return { name: call.name, success: false, error: "小手机设置修改能力未启用", userNotice: "小手机设置修改能力未启用" };
+    }
+    if (!isSupportedChatToolContext(context)) {
+        return { name: call.name, success: false, error: "只能由已授权的聊天角色修改小手机设置" };
+    }
+    const phoneContext = {
+        sessionId: context.sessionId,
+        characterId: context.characterId,
+        characterDisplayName: context.characterDisplayName,
+    };
+    return call.name === "撤销小手机设置修改"
+        ? undoPhoneManagementSettings(call.args, phoneContext)
+        : changePhoneManagementSettings(call.args, phoneContext);
+}
+
+async function executePhoneInteractionReadTool(call: ToolCall, context?: ToolExecutionContext): Promise<ToolResult> {
+    const capability = getInternalCapability(PHONE_INTERACTION_READ_CAPABILITY_ID);
+    if ((!capability || !capability.enabled || capability.mode === "off") && !isAuthorizedEirenUserViewRead(call, context)) {
+        return { name: call.name, success: false, error: "查看小手机互动能力未启用", userNotice: "查看小手机互动能力未启用" };
+    }
+    if (!isSupportedChatToolContext(context)) {
+        return { name: call.name, success: false, error: "只能由已授权的聊天角色查看小手机互动" };
+    }
+    const phoneContext = {
+        sessionId: context.sessionId,
+        characterId: context.characterId,
+        characterDisplayName: context.characterDisplayName,
+    };
+    if (call.name === "列出可查看的互动") return listReadablePhoneInteractions(call.args, phoneContext);
+    if (call.name === "查看最近聊天") return readRecentPhoneChat(call.args, phoneContext);
+    return readPhoneCallHistory(call.args, phoneContext);
 }
 
 function isRealityBridgeToolName(name: string): boolean {
@@ -959,6 +1222,7 @@ async function executeRealityBridgeTool(call: ToolCall, context?: ToolExecutionC
 
     const shortcutAction = loadBridgeShortcutActions().find(item => item.enabled && item.name === call.name);
     if (shortcutAction) {
+        let createdCommandId = "";
         try {
             const created = await createShortcutCommand(
                 shortcutAction,
@@ -966,6 +1230,7 @@ async function executeRealityBridgeTool(call: ToolCall, context?: ToolExecutionC
                 context?.signal,
                 { deferDelivery: shortcutAction.resultMode !== "none" && Boolean(context?.onShortcutCommandCreated) },
             );
+            createdCommandId = created.command.id;
             if (shortcutAction.resultMode === "none") {
                 if (!created.delivered) {
                     return {
@@ -1029,7 +1294,10 @@ async function executeRealityBridgeTool(call: ToolCall, context?: ToolExecutionC
                 userNotice: `「${shortcutAction.name}」已完成`,
             };
         } catch (err) {
-            if (isAbortError(err)) throw err;
+            if (isAbortError(err)) {
+                if (createdCommandId) await cancelShortcutCommand(createdCommandId).catch(() => undefined);
+                throw err;
+            }
             return { name: call.name, success: false, error: err instanceof Error ? err.message : String(err) };
         }
     }
@@ -1158,14 +1426,40 @@ function stringArrayArg(args: Record<string, unknown>, key: string): string[] | 
     return items.length > 0 ? items : undefined;
 }
 
-async function executeLocalDataTool(call: ToolCall): Promise<ToolResult> {
+async function executeLocalDataTool(call: ToolCall, context?: ToolExecutionContext): Promise<ToolResult> {
     const capability = getInternalCapability(LOCAL_DATA_LIBRARY_CAPABILITY_ID);
-    if (!capability || !capability.enabled || capability.mode === "off") {
+    if ((!capability || !capability.enabled || capability.mode === "off") && !isAuthorizedEirenUserViewRead(call, context)) {
         return {
             name: call.name,
             success: false,
             error: "本地资料库能力未启用",
             userNotice: "本地资料库能力未启用",
+        };
+    }
+
+    if (!isSupportedChatToolContext(context)) {
+        return { name: call.name, success: false, error: "只能由已授权的聊天角色使用本地资料库" };
+    }
+    const requestedPath = optionalStringArg(call.args, "path")?.trim() || "/";
+    const normalizedPath = `/${requestedPath.replace(/^\/+/, "")}`.replace(/\/+$/, "") || "/";
+    const ownerViewRead = isAuthorizedEirenUserViewRead(call, context);
+    const scansAllModules = call.name === "搜索资料记录" && normalizedPath === "/";
+    const targetsPrivateChat = normalizedPath === "/chat" || normalizedPath.startsWith("/chat/");
+    if (scansAllModules || targetsPrivateChat) {
+        return {
+            name: call.name,
+            success: false,
+            error: "聊天、通话及其缓存必须通过 phone_interaction_read 的受控内容接口读取，禁止从本地资料库旁路访问",
+            userNotice: "该路径包含受保护的互动内容，请使用查看小手机互动能力",
+        };
+    }
+    if (ownerViewRead && (isRolePhoneLocalDataPath(normalizedPath)
+        || (call.name === "搜索资料记录" && isBroadLocalDataScopeContainingRolePhone(normalizedPath)))) {
+        return {
+            name: call.name,
+            success: false,
+            error: "user_view_read 不包含角色手机；禁止读取或扫描角色手机数据源、缓存及关联索引",
+            userNotice: "角色手机整体不在 Eiren 的只读范围内",
         };
     }
 
@@ -1211,7 +1505,7 @@ async function executeLocalDataTool(call: ToolCall): Promise<ToolResult> {
         return {
             name: call.name,
             success: true,
-            data: stringifyLocalDataResult(data),
+            data: stringifyLocalDataResult(ownerViewRead ? sanitizeUserViewReadResult(data) : data),
             userNotice: `${call.name}完成`,
         };
     } catch (err) {
@@ -2252,7 +2546,7 @@ async function executeAgentComputerTool(call: ToolCall, context?: ToolExecutionC
         name: call.name, success: false, error, continueConversation: false, persistToHistory: false, userNotice,
     });
     const capability = getInternalCapability(AGENT_COMPUTER_CAPABILITY_ID);
-    if (!capability || !capability.enabled || capability.mode === "off") return failed("角色电脑能力未启用");
+    if ((!capability || !capability.enabled || capability.mode === "off") && !isAuthorizedEirenUserViewRead(call, context)) return failed("角色电脑能力未启用");
     if (!isAgentComputerConfigured()) return failed("角色电脑尚未连接（设置 → 角色电脑）");
     if (!isSupportedChatToolContext(context)) return failed("当前场景暂不支持角色电脑");
 
@@ -2260,34 +2554,110 @@ async function executeAgentComputerTool(call: ToolCall, context?: ToolExecutionC
     const args = call.args || {};
     const op = String(args.op ?? "").trim();
     const path = String(args.path ?? "").trim();
+    const ownerViewRead = isAuthorizedEirenUserViewRead(call, context);
+    if (ownerViewRead && isRolePhoneReference(path)) {
+        return failed("user_view_read 不包含角色手机；角色电脑不得旁路读取其文件、缓存或索引");
+    }
     const baseName = path.split("/").pop() || path;
+    const request = <T = Record<string, unknown>>(action: string, payload: Record<string, unknown>) => (
+        agentComputerRequest<T>(action, workspace, payload, undefined, context?.signal)
+    );
+    type UndoSnapshot = { v: 1; id: string; path: string; existed: boolean; before: string; after: string; createdAt: string };
+    const undoPath = (id: string) => `/.ai-phone-undo/${id}.json`;
+    const readExisting = async (targetPath: string): Promise<{ existed: boolean; content: string }> => {
+        try {
+            const current = await request<{ content: string; truncated: boolean }>("read", { path: targetPath, maxChars: 1_000_001 });
+            if (current.truncated) throw new Error("文件超过安全撤销上限，未执行修改");
+            return { existed: true, content: current.content };
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (/not found|不存在|enoent|404/i.test(message)) return { existed: false, content: "" };
+            throw error;
+        }
+    };
+    const saveUndoSnapshot = async (targetPath: string, after: string): Promise<UndoSnapshot> => {
+        const before = await readExisting(targetPath);
+        const snapshot: UndoSnapshot = {
+            v: 1, id: `undo_${crypto.randomUUID()}`, path: targetPath,
+            existed: before.existed, before: before.content, after, createdAt: new Date().toISOString(),
+        };
+        await request("write", { path: undoPath(snapshot.id), content: JSON.stringify(snapshot) });
+        return snapshot;
+    };
 
     try {
         if (op === "write") {
             const content = String(args.content ?? "");
             if (!path) return failed("缺少 path");
             if (!content) return failed("缺少 content");
-            await agentComputerRequest("write", workspace, { path, content });
+            const snapshot = await saveUndoSnapshot(path, content);
+            try {
+                await request("write", { path, content });
+            } catch (error) {
+                await request("delete", { path: undoPath(snapshot.id) }).catch(() => undefined);
+                throw error;
+            }
             return {
                 name: call.name, success: true,
-                data: `已写入自己电脑：${path}（${content.length} 字符）`,
+                data: `已写入自己电脑：${path}（${content.length} 字符）\n撤销编号：${snapshot.id}`,
                 continueConversation: true, persistToHistory: false,
                 userNotice: `📂 在自己的电脑上写下了《${baseName}》`,
             };
         }
-        if (op === "read") {
+        if (op === "delete") {
             if (!path) return failed("缺少 path");
-            const data = await agentComputerRequest<{ content: string; truncated: boolean }>("read", workspace, { path, maxChars: 20000 });
+            if (args.confirm !== true) return failed("删除文件需要对方明确要求，并传 confirm=true");
+            const before = await readExisting(path);
+            if (!before.existed) return failed("文件不存在");
+            const snapshot: UndoSnapshot = {
+                v: 1, id: `undo_${crypto.randomUUID()}`, path, existed: true,
+                before: before.content, after: "", createdAt: new Date().toISOString(),
+            };
+            await request("write", { path: undoPath(snapshot.id), content: JSON.stringify(snapshot) });
+            await request("delete", { path });
             return {
                 name: call.name, success: true,
-                data: `${path} 的内容：\n${data.content}${data.truncated ? "\n…（已截断）" : ""}`,
+                data: `已删除自己电脑里的文件：${path}\n撤销编号：${snapshot.id}`,
+                continueConversation: true, persistToHistory: false,
+                userNotice: `已删除《${baseName}》，需要时可撤销`,
+            };
+        }
+        if (op === "undo") {
+            const undoId = String(args.undoId ?? "").trim();
+            if (!/^undo_[a-f0-9-]{20,80}$/i.test(undoId)) return failed("撤销编号无效");
+            const backup = await request<{ content: string; truncated: boolean }>("read", { path: undoPath(undoId), maxChars: 2_100_000 });
+            if (backup.truncated) return failed("撤销快照不完整，未执行撤销");
+            const snapshot = JSON.parse(backup.content) as UndoSnapshot;
+            if (snapshot.v !== 1 || snapshot.id !== undoId || !snapshot.path) return failed("撤销快照无效");
+            const current = await readExisting(snapshot.path);
+            const expectedExists = snapshot.after !== "";
+            if (current.existed !== expectedExists || (expectedExists && current.content !== snapshot.after)) {
+                return failed("文件后来又被修改，为避免覆盖新内容，本次没有撤销");
+            }
+            if (snapshot.existed) await request("write", { path: snapshot.path, content: snapshot.before });
+            else if (current.existed) await request("delete", { path: snapshot.path });
+            await request("delete", { path: undoPath(undoId) }).catch(() => undefined);
+            return {
+                name: call.name, success: true,
+                data: `已撤销对 ${snapshot.path} 的修改`,
+                continueConversation: true, persistToHistory: false,
+                userNotice: `已撤销《${snapshot.path.split("/").pop() || snapshot.path}》的修改`,
+            };
+        }
+        if (op === "read") {
+            if (!path) return failed("缺少 path");
+            const data = await request<{ content: string; truncated: boolean }>("read", { path, maxChars: 20000 });
+            return {
+                name: call.name, success: true,
+                data: `${path} 的内容：\n${String(ownerViewRead ? sanitizeUserViewReadResult(data.content) : data.content)}${data.truncated ? "\n…（已截断）" : ""}`,
                 continueConversation: true, persistToHistory: false,
             };
         }
         if (op === "list") {
-            const data = await agentComputerRequest<{ entries: Array<{ name: string; dir: boolean }> }>("list", workspace, { path: path || "/" });
-            const listing = data.entries.length
-                ? data.entries.map(entry => `${entry.dir ? "[目录]" : "[文件]"} ${entry.name}`).join("\n")
+            const data = await request<{ entries: Array<{ name: string; dir: boolean }> }>("list", { path: path || "/" });
+            const entries = ownerViewRead ? data.entries.filter(entry => !isRolePhoneReference(entry.name)) : data.entries;
+            const listing = entries.length
+                ? entries.map(entry => `${entry.dir ? "[目录]" : "[文件]"} ${entry.name}`).join("\n")
                 : "（空目录）";
             return {
                 name: call.name, success: true,
@@ -2297,7 +2667,7 @@ async function executeAgentComputerTool(call: ToolCall, context?: ToolExecutionC
         }
         if (op === "send") {
             if (!path) return failed("缺少 path");
-            const data = await agentComputerRequest<{ base64: string }>("read_base64", workspace, { path });
+            const data = await request<{ base64: string }>("read_base64", { path });
             const mime = agentComputerMimeFor(path);
             const bytes = Uint8Array.from(atob(data.base64), c => c.charCodeAt(0));
             const type = inferMediaAttachmentType(path, baseName);
@@ -2313,8 +2683,7 @@ async function executeAgentComputerTool(call: ToolCall, context?: ToolExecutionC
             const command = String(args.command ?? "").trim();
             if (!command) return failed("缺少 command");
             try {
-                const data = await agentComputerRequest<{ exitCode: number; stdout: string; stderr: string }>(
-                    "exec", workspace, { command });
+                const data = await request<{ exitCode: number; stdout: string; stderr: string }>("exec", { command });
                 const parts = [`$ ${command}`, `退出码：${data.exitCode}`];
                 if (data.stdout) parts.push(`stdout：\n${data.stdout}`);
                 if (data.stderr) parts.push(`stderr：\n${data.stderr}`);
@@ -2333,8 +2702,9 @@ async function executeAgentComputerTool(call: ToolCall, context?: ToolExecutionC
                 throw err;
             }
         }
-        return failed("op 需为 write / read / list / send / exec 之一");
+        return failed("op 需为 write / undo / delete / read / list / send / exec 之一");
     } catch (err) {
+        if (isAbortError(err)) throw err;
         const message = err instanceof Error ? err.message : String(err);
         return failed(`角色电脑操作失败：${message}`);
     }

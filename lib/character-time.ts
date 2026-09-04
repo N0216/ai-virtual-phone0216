@@ -14,6 +14,13 @@ export type GroupTimeMember = {
   timeZone?: string | null;
 };
 
+export type TemporalMessage = {
+  role: string;
+  createdAt?: string | null;
+};
+
+export const TEMPORAL_AWARENESS_TAG = "temporal_awareness";
+
 const WEEKDAYS = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"];
 
 type DateParts = {
@@ -23,6 +30,12 @@ type DateParts = {
   hour: string;
   minute: string;
   second: string;
+};
+
+type TemporalAnchor = {
+  role: "user" | "assistant";
+  createdAt: string;
+  date: Date;
 };
 
 function readTimeZone(): string {
@@ -83,6 +96,115 @@ function getDateParts(date: Date, timeZone: string): DateParts {
   };
 }
 
+function getDateKey(date: Date, timeZone: string): string {
+  const parts = getDateParts(date, timeZone);
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+function getDayPart(date: Date, timeZone: string): string {
+  const hour = Number(getDateParts(date, timeZone).hour);
+  if (hour < 5) return "凌晨";
+  if (hour < 8) return "清晨";
+  if (hour < 12) return "上午";
+  if (hour < 14) return "中午";
+  if (hour < 18) return "下午";
+  if (hour < 22) return "晚上";
+  return "深夜";
+}
+
+function formatElapsed(from: Date, to: Date): string {
+  const elapsedSeconds = Math.max(0, Math.floor((to.getTime() - from.getTime()) / 1000));
+  if (elapsedSeconds < 45) return "刚刚";
+  if (elapsedSeconds < 60 * 60) return `${Math.max(1, Math.round(elapsedSeconds / 60))}分钟前`;
+  if (elapsedSeconds < 24 * 60 * 60) {
+    const hours = Math.floor(elapsedSeconds / (60 * 60));
+    const minutes = Math.floor((elapsedSeconds % (60 * 60)) / 60);
+    return minutes >= 10 ? `${hours}小时${minutes}分钟前` : `${hours}小时前`;
+  }
+  const days = Math.floor(elapsedSeconds / (24 * 60 * 60));
+  const hours = Math.floor((elapsedSeconds % (24 * 60 * 60)) / (60 * 60));
+  return hours >= 2 ? `${days}天${hours}小时前` : `${days}天前`;
+}
+
+function readTemporalAnchors(messages?: TemporalMessage[]): TemporalAnchor[] {
+  if (!messages?.length) return [];
+  return messages.flatMap(message => {
+    if (message.role !== "user" && message.role !== "assistant") return [];
+    if (!message.createdAt) return [];
+    const date = new Date(message.createdAt);
+    if (!Number.isFinite(date.getTime())) return [];
+    return [{ role: message.role, createdAt: date.toISOString(), date } as TemporalAnchor];
+  }).sort((a, b) => a.date.getTime() - b.date.getTime());
+}
+
+function escapeXmlAttribute(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function buildTemporalAwarenessBlock(params: {
+  now: Date;
+  systemTime: string;
+  systemWeekday: string;
+  systemTimeZone: string;
+  characterTime?: string;
+  characterWeekday?: string;
+  characterTimeZone?: string;
+  messages?: TemporalMessage[];
+  groupRows?: string[];
+  groupMembers?: GroupTimeMember[];
+}): string {
+  const anchors = readTemporalAnchors(params.messages);
+  const latest = anchors.at(-1);
+  const previous = anchors.at(-2);
+  const lastUser = [...anchors].reverse().find(anchor => anchor.role === "user");
+  const lastAssistant = [...anchors].reverse().find(anchor => anchor.role === "assistant");
+  const preferredTimeZone = params.characterTimeZone || params.systemTimeZone;
+  const attributes = [
+    `system_time_zone="${escapeXmlAttribute(params.systemTimeZone)}"`,
+    `character_time_zone="${escapeXmlAttribute(preferredTimeZone)}"`,
+    params.groupMembers?.length
+      ? `group_time_zones="${escapeXmlAttribute(encodeURIComponent(JSON.stringify(params.groupMembers)))}"`
+      : "",
+    lastUser ? `last_user_at="${lastUser.createdAt}"` : "",
+    lastAssistant ? `last_assistant_at="${lastAssistant.createdAt}"` : "",
+    latest ? `latest_at="${latest.createdAt}"` : "",
+    previous ? `previous_at="${previous.createdAt}"` : "",
+  ].filter(Boolean).join(" ");
+
+  const rows = [
+    `当前系统时间：${params.systemTime} ${params.systemTimeZone}，${params.systemWeekday}（${getDayPart(params.now, params.systemTimeZone)}）`,
+  ];
+  if (params.characterTime && params.characterTimeZone) {
+    rows.push(`角色本地时间：${params.characterTime} ${params.characterTimeZone}，${params.characterWeekday}（${getDayPart(params.now, params.characterTimeZone)}）`);
+    rows.push("判断角色作息、问候、深夜/清晨/工作时间时，优先使用角色本地时间。");
+  }
+  if (params.groupRows?.length) {
+    rows.push("群成员本地时间：", ...params.groupRows);
+    rows.push("判断每个角色作息、问候、深夜/清晨/工作时间时，优先使用该角色自己的本地时间。");
+  }
+  if (lastUser) rows.push(`用户最近一条消息：${formatElapsed(lastUser.date, params.now)}`);
+  if (lastAssistant) rows.push(`你最近一条回复：${formatElapsed(lastAssistant.date, params.now)}`);
+  if (latest) rows.push(`最近一次真实聊天活动：${formatElapsed(latest.date, params.now)}`);
+  if (latest && previous) {
+    const gapMs = latest.date.getTime() - previous.date.getTime();
+    if (gapMs >= 30 * 60 * 1000) {
+      rows.push(`最近两次真实聊天活动相隔：${formatElapsed(previous.date, latest.date)}`);
+    }
+    if (getDateKey(previous.date, preferredTimeZone) !== getDateKey(latest.date, preferredTimeZone)) {
+      rows.push("最近两次真实聊天活动已经跨日，不要把之前那次误称为“刚刚”。");
+    }
+  }
+  if (latest && getDateKey(latest.date, preferredTimeZone) !== getDateKey(params.now, preferredTimeZone)) {
+    rows.push("最近一次真实聊天活动与现在不在同一天，请正确使用“昨天/前天/几天前”等措辞。");
+  }
+  rows.push("这些是系统计算好的时间事实。请自然体现在作息、问候、等待感和“刚刚/昨天”等措辞中；除非对话自然需要，不要机械报时或复述本段。自动发消息时也必须依据真实间隔，不要假装用户刚刚发过消息。");
+  return `<${TEMPORAL_AWARENESS_TAG} ${attributes}>\n${rows.join("\n")}\n</${TEMPORAL_AWARENESS_TAG}>`;
+}
+
 export function formatZonedPromptTimestamp(date: Date, timeZone: string, includeTimeZone = false): string {
   const parts = getDateParts(date, timeZone);
   return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}${includeTimeZone ? ` ${timeZone}` : ""}`;
@@ -112,7 +234,11 @@ export function hasTimeZoneDifference(date: Date, characterTimeZone: string, sys
     || systemParts.minute !== characterParts.minute;
 }
 
-export function buildCharacterTimeContext(timeZone?: string | null, now = new Date()): CharacterTimeContext {
+export function buildCharacterTimeContext(
+  timeZone?: string | null,
+  now = new Date(),
+  messages?: TemporalMessage[],
+): CharacterTimeContext {
   const systemTimeZone = getSystemTimeZone();
   const systemTime = formatZonedChineseDateTime(now, systemTimeZone);
   const systemWeekday = getZonedWeekday(now, systemTimeZone);
@@ -127,7 +253,13 @@ export function buildCharacterTimeContext(timeZone?: string | null, now = new Da
       characterTime: "",
       characterWeekday: "",
       characterTimeZone: "",
-      timeContext: `当前系统时间：${systemTime}，${systemWeekday}`,
+      timeContext: buildTemporalAwarenessBlock({
+        now,
+        systemTime,
+        systemWeekday,
+        systemTimeZone,
+        messages,
+      }),
       hasDifference: false,
     };
   }
@@ -141,16 +273,25 @@ export function buildCharacterTimeContext(timeZone?: string | null, now = new Da
     characterTime,
     characterWeekday,
     characterTimeZone: normalizedTimeZone,
-    timeContext: [
-      `当前系统时间：${systemTime} ${systemTimeZone}，${systemWeekday}`,
-      `角色本地时间：${characterTime} ${normalizedTimeZone}，${characterWeekday}`,
-      "判断角色作息、问候、深夜/清晨/工作时间时，优先使用角色本地时间。",
-    ].join("\n"),
+    timeContext: buildTemporalAwarenessBlock({
+      now,
+      systemTime,
+      systemWeekday,
+      systemTimeZone,
+      characterTime,
+      characterWeekday,
+      characterTimeZone: normalizedTimeZone,
+      messages,
+    }),
     hasDifference: true,
   };
 }
 
-export function buildGroupTimeContext(members: GroupTimeMember[], now = new Date()): CharacterTimeContext {
+export function buildGroupTimeContext(
+  members: GroupTimeMember[],
+  now = new Date(),
+  messages?: TemporalMessage[],
+): CharacterTimeContext {
   const systemTimeZone = getSystemTimeZone();
   const systemTime = formatZonedChineseDateTime(now, systemTimeZone);
   const systemWeekday = getZonedWeekday(now, systemTimeZone);
@@ -170,7 +311,13 @@ export function buildGroupTimeContext(members: GroupTimeMember[], now = new Date
       characterTime: "",
       characterWeekday: "",
       characterTimeZone: "",
-      timeContext: `当前系统时间：${systemTime}，${systemWeekday}`,
+      timeContext: buildTemporalAwarenessBlock({
+        now,
+        systemTime,
+        systemWeekday,
+        systemTimeZone,
+        messages,
+      }),
       hasDifference: false,
     };
   }
@@ -182,12 +329,15 @@ export function buildGroupTimeContext(members: GroupTimeMember[], now = new Date
     characterTime: "",
     characterWeekday: "",
     characterTimeZone: "",
-    timeContext: [
-      `当前系统时间：${systemTime} ${systemTimeZone}，${systemWeekday}`,
-      "群成员本地时间：",
-      ...rows,
-      "判断每个角色作息、问候、深夜/清晨/工作时间时，优先使用该角色自己的本地时间。",
-    ].join("\n"),
+    timeContext: buildTemporalAwarenessBlock({
+      now,
+      systemTime,
+      systemWeekday,
+      systemTimeZone,
+      messages,
+      groupRows: rows,
+      groupMembers: members,
+    }),
     hasDifference: true,
   };
 }

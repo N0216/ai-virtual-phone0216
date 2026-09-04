@@ -1,4 +1,5 @@
 import { kvGet, kvSet, kvRemove, registerKvMigration } from "./kv-db";
+import { redactSensitiveLogText } from "./log-redaction";
 
 export type ModelUsageCategory =
     | "manual_chat"
@@ -16,6 +17,7 @@ export type ModelUsageEntry = {
     model?: string;
     label?: string;
     promptTokens: number;
+    cachedPromptTokens?: number;
     completionTokens: number;
     totalTokens: number;
     estimated: boolean;
@@ -30,6 +32,7 @@ export type ModelUsageLimitSettings = {
 export type ModelUsageSummary = {
     calls: number;
     promptTokens: number;
+    cachedPromptTokens: number;
     completionTokens: number;
     totalTokens: number;
     hasEstimate: boolean;
@@ -105,6 +108,7 @@ export function recordModelUsage(input: {
     model?: string;
     label?: string;
     promptTokens?: number;
+    cachedPromptTokens?: number;
     completionTokens?: number;
     totalTokens?: number;
     estimated?: boolean;
@@ -114,15 +118,17 @@ export function recordModelUsage(input: {
     const timestamp = input.timestamp || Date.now();
     const promptTokens = finiteNonNegative(input.promptTokens);
     const completionTokens = finiteNonNegative(input.completionTokens);
+    const cachedPromptTokens = Math.min(promptTokens, finiteNonNegative(input.cachedPromptTokens));
     const suppliedTotal = finiteNonNegative(input.totalTokens);
     const entry: ModelUsageEntry = {
         id: `${timestamp}-${Math.random().toString(36).slice(2, 8)}`,
         timestamp,
         dayKey: localUsageDayKey(timestamp),
         category: input.category,
-        model: input.model?.trim() || undefined,
-        label: input.label?.trim() || undefined,
+        model: input.model ? redactSensitiveLogText(input.model.trim()) || undefined : undefined,
+        label: input.label ? redactSensitiveLogText(input.label.trim()) || undefined : undefined,
         promptTokens,
+        cachedPromptTokens,
         completionTokens,
         totalTokens: suppliedTotal || promptTokens + completionTokens,
         estimated: input.estimated === true,
@@ -143,10 +149,11 @@ export function summarizeModelUsage(entries: ModelUsageEntry[]): ModelUsageSumma
     return entries.reduce<ModelUsageSummary>((summary, entry) => ({
         calls: summary.calls + 1,
         promptTokens: summary.promptTokens + finiteNonNegative(entry.promptTokens),
+        cachedPromptTokens: summary.cachedPromptTokens + finiteNonNegative(entry.cachedPromptTokens),
         completionTokens: summary.completionTokens + finiteNonNegative(entry.completionTokens),
         totalTokens: summary.totalTokens + finiteNonNegative(entry.totalTokens),
         hasEstimate: summary.hasEstimate || entry.estimated,
-    }), { calls: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, hasEstimate: false });
+    }), { calls: 0, promptTokens: 0, cachedPromptTokens: 0, completionTokens: 0, totalTokens: 0, hasEstimate: false });
 }
 
 export function getTodayModelUsage(category?: ModelUsageCategory): ModelUsageSummary {

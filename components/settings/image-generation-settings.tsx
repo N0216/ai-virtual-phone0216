@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
-import { AlertCircle, Camera, ChevronDown, Image, RefreshCw, Sparkles, Trash2, Upload } from "lucide-react";
+import { AlertCircle, Camera, ChevronDown, Image, Plus, RefreshCw, Sparkles, Trash2, Upload } from "lucide-react";
 import type { ImageGenerationSettings as ImageGenerationSettingsType } from "@/lib/settings-types";
 import {
     DEFAULT_IMAGE_GENERATION_SETTINGS,
@@ -53,6 +53,21 @@ const IMAGE_HOSTING_PROVIDER_OPTIONS = [
 const imageGenerationIconStyle = { "--icon-color": "#0EA5E9" } as CSSProperties;
 
 type Status = { success: boolean; message: string };
+type ImageProvider = ImageGenerationSettingsType["providers"][number];
+
+function mirrorActiveProvider(settings: ImageGenerationSettingsType, provider: ImageProvider): ImageGenerationSettingsType {
+    return {
+        ...settings,
+        activeProviderId: provider.id,
+        requestMode: provider.requestMode,
+        apiKey: provider.apiKey,
+        baseUrl: provider.baseUrl,
+        model: provider.model,
+        size: provider.size,
+        quality: provider.quality,
+        extraPrompt: provider.extraPrompt,
+    };
+}
 
 export function ImageGenerationSettings() {
     const [settings, setSettings] = useState<ImageGenerationSettingsType>(DEFAULT_IMAGE_GENERATION_SETTINGS);
@@ -111,12 +126,70 @@ export function ImageGenerationSettings() {
         persist({ ...settings, ...patch });
     }, [persist, settings]);
 
+    const activeProvider = useMemo(
+        () => settings.providers.find((item) => item.id === settings.activeProviderId) ?? settings.providers[0],
+        [settings.activeProviderId, settings.providers],
+    );
+
+    const updateActiveProvider = useCallback((patch: Partial<ImageProvider>) => {
+        if (!activeProvider) return;
+        const updated: ImageProvider = { ...activeProvider, ...patch, updatedAt: Date.now() };
+        persist(mirrorActiveProvider({
+            ...settings,
+            providers: settings.providers.map((item) => item.id === updated.id ? updated : item),
+        }, updated));
+    }, [activeProvider, persist, settings]);
+
+    const selectProvider = useCallback((providerId: string) => {
+        const provider = settings.providers.find((item) => item.id === providerId);
+        if (!provider) return;
+        setModels(provider.models);
+        persist(mirrorActiveProvider(settings, provider));
+    }, [persist, settings]);
+
+    const addProvider = useCallback(() => {
+        const createdAt = Date.now();
+        const id = typeof crypto !== "undefined" && "randomUUID" in crypto
+            ? `image-provider-${crypto.randomUUID()}`
+            : `image-provider-${createdAt}`;
+        const provider: ImageProvider = {
+            id,
+            name: `生图服务 ${settings.providers.length + 1}`,
+            requestMode: "direct",
+            apiKey: "",
+            baseUrl: "https://api.openai.com/v1",
+            model: "gpt-image-2",
+            models: ["gpt-image-2"],
+            size: "1024x1024",
+            quality: "auto",
+            extraPrompt: withRatioHint("", "1024x1024"),
+            createdAt,
+            updatedAt: createdAt,
+        };
+        setModels(provider.models);
+        persist(mirrorActiveProvider({ ...settings, providers: [...settings.providers, provider] }, provider));
+        setStatus({ success: true, message: "已新增一套生图服务配置。" });
+    }, [persist, settings]);
+
+    const removeActiveProvider = useCallback(() => {
+        if (!activeProvider || settings.providers.length <= 1) {
+            setStatus({ success: false, message: "至少需要保留一套生图配置。" });
+            return;
+        }
+        const providers = settings.providers.filter((item) => item.id !== activeProvider.id);
+        const nextProvider = providers[0];
+        const bindings = Object.fromEntries(Object.entries(settings.characterProviderBindings).filter(([, providerId]) => providerId !== activeProvider.id));
+        setModels(nextProvider.models);
+        persist(mirrorActiveProvider({ ...settings, providers, characterProviderBindings: bindings }, nextProvider));
+        setStatus({ success: true, message: "已删除这套生图配置，相关角色已恢复使用全局默认。" });
+    }, [activeProvider, persist, settings]);
+
     // Changing the size also refreshes the auto-appended ratio hint in the
     // 补充提示词 box (replacing any previous hint), so models that ignore the
     // `size` param still produce the requested orientation.
     const applySize = useCallback((size: string) => {
-        persist({ ...settings, size, extraPrompt: withRatioHint(settings.extraPrompt, size) });
-    }, [persist, settings]);
+        updateActiveProvider({ size, extraPrompt: withRatioHint(settings.extraPrompt, size) });
+    }, [settings.extraPrompt, updateActiveProvider]);
 
     const updateImageHosting = useCallback((patch: Partial<ImageGenerationSettingsType["imageHosting"]>) => {
         persist({
@@ -128,7 +201,7 @@ export function ImageGenerationSettings() {
         });
     }, [persist, settings]);
 
-    const likelyModels = useMemo(() => filterLikelyImageModels(models), [models]);
+    const likelyModels = useMemo(() => filterLikelyImageModels(Array.from(new Set([...(activeProvider?.models || []), ...models]))), [activeProvider?.models, models]);
 
     const fetchModels = async () => {
         setStatus(null);
@@ -140,6 +213,7 @@ export function ImageGenerationSettings() {
         try {
             const fetched = await fetchImageGenerationModels(settings);
             setModels(fetched);
+            updateActiveProvider({ models: fetched });
             setStatus({
                 success: true,
                 message: fetched.length > 0 ? `已拉取 ${fetched.length} 个模型。` : "接口返回为空，可手动填写模型名。",
@@ -193,6 +267,13 @@ export function ImageGenerationSettings() {
         });
     };
 
+    const bindCharacterProvider = (characterId: string, providerId: string) => {
+        const bindings = { ...settings.characterProviderBindings };
+        if (providerId) bindings[characterId] = providerId;
+        else delete bindings[characterId];
+        persist({ ...settings, characterProviderBindings: bindings });
+    };
+
     return (
         <div className="flex flex-col gap-6 pb-8">
             <div className="flex items-center">
@@ -215,11 +296,31 @@ export function ImageGenerationSettings() {
             </div>
 
             <div className="menu-group p-4 flex flex-col gap-4">
+                <div className="rounded-[18px] border border-[var(--c-card-border)] bg-[var(--c-input)] p-3">
+                    <div className="flex items-end gap-2">
+                        <div className="min-w-0 flex-1">
+                            <label className="menu-desc ml-1">当前生图服务（全局默认）</label>
+                            <Select value={settings.activeProviderId} onChange={(event) => selectProvider(event.target.value)}>
+                                {settings.providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}
+                            </Select>
+                        </div>
+                        <button type="button" className="ui-btn ui-btn-soft-action shrink-0" onClick={addProvider}><Plus size={16} />新增</button>
+                        <button type="button" className="ui-link-btn shrink-0" data-variant="danger" aria-label="删除当前生图服务" onClick={removeActiveProvider}><Trash2 size={18} /></button>
+                    </div>
+                    {activeProvider ? (
+                        <div className="mt-3 flex flex-col gap-1">
+                            <label className="menu-desc ml-1">服务名称</label>
+                            <Input value={activeProvider.name} maxLength={40} onChange={(event) => updateActiveProvider({ name: event.target.value })} placeholder="例如：OpenAI 生图 / Flux 中转" />
+                        </div>
+                    ) : null}
+                    <p className="menu-desc mb-0 ml-1 mt-2">可以保存多套 Key、地址和模型；这里选中的是没有单独指定角色时使用的默认项。</p>
+                </div>
+
                 <div className="flex flex-col gap-1">
                     <label className="menu-desc ml-1">请求方式</label>
                     <Select
                         value={settings.requestMode}
-                        onChange={(event) => updateSettings({
+                        onChange={(event) => updateActiveProvider({
                             requestMode: event.target.value as ImageGenerationSettingsType["requestMode"],
                         })}
                     >
@@ -236,7 +337,7 @@ export function ImageGenerationSettings() {
                     <Input
                         type="url"
                         value={settings.baseUrl}
-                        onChange={(event) => updateSettings({ baseUrl: event.target.value })}
+                        onChange={(event) => updateActiveProvider({ baseUrl: event.target.value })}
                         placeholder="https://api.example.com/v1"
                     />
                 </div>
@@ -246,7 +347,7 @@ export function ImageGenerationSettings() {
                     <Input
                         type="password"
                         value={settings.apiKey}
-                        onChange={(event) => updateSettings({ apiKey: event.target.value })}
+                        onChange={(event) => updateActiveProvider({ apiKey: event.target.value })}
                         placeholder="sk-..."
                     />
                 </div>
@@ -259,7 +360,7 @@ export function ImageGenerationSettings() {
                             <Input
                                 type="text"
                                 value={settings.model}
-                                onChange={(event) => updateSettings({ model: event.target.value })}
+                                onChange={(event) => updateActiveProvider({ model: event.target.value, models: Array.from(new Set([...(activeProvider?.models || []), event.target.value].filter(Boolean))) })}
                                 placeholder="gpt-image-2 / image2 / chatgpt-image-latest"
                                 className={likelyModels.length > 0 ? "w-full pr-9" : "w-full"}
                             />
@@ -270,7 +371,7 @@ export function ImageGenerationSettings() {
                                         aria-label="选择拉取到的模型"
                                         value=""
                                         onChange={(event) => {
-                                            if (event.target.value) updateSettings({ model: event.target.value });
+                                            if (event.target.value) updateActiveProvider({ model: event.target.value });
                                         }}
                                         className="absolute inset-y-0 right-0 w-10 cursor-pointer opacity-0"
                                     >
@@ -301,7 +402,7 @@ export function ImageGenerationSettings() {
                     </div>
                     <div className="flex flex-col gap-1">
                         <label className="menu-desc ml-1">质量</label>
-                        <Select value={settings.quality} onChange={(event) => updateSettings({ quality: event.target.value })}>
+                        <Select value={settings.quality} onChange={(event) => updateActiveProvider({ quality: event.target.value })}>
                             {QUALITY_OPTIONS.map(option => <option key={option} value={option}>{option}</option>)}
                         </Select>
                     </div>
@@ -311,7 +412,7 @@ export function ImageGenerationSettings() {
                     <label className="menu-desc ml-1">补充提示词</label>
                     <Textarea
                         value={settings.extraPrompt}
-                        onChange={(event) => updateSettings({ extraPrompt: event.target.value })}
+                        onChange={(event) => updateActiveProvider({ extraPrompt: event.target.value })}
                         placeholder="会和角色输出的图片描述一起发送给生图模型。"
                         rows={4}
                     />
@@ -469,6 +570,15 @@ export function ImageGenerationSettings() {
                                 <span className="min-w-0 flex flex-1 flex-col">
                                     <span className="menu-label truncate">{character.name}</span>
                                     <span className="menu-desc truncate">{preview ? "已上传参考图" : "未上传参考图"}</span>
+                                    <select
+                                        aria-label={`${character.name} 的生图服务`}
+                                        className="mt-1 min-h-8 max-w-full rounded-lg border border-[var(--c-card-border)] bg-[var(--c-input)] px-2 text-[11px] text-[var(--c-text-title)]"
+                                        value={settings.characterProviderBindings[character.id] || ""}
+                                        onChange={(event) => bindCharacterProvider(character.id, event.target.value)}
+                                    >
+                                        <option value="">跟随全局：{activeProvider?.name || "原版配置"}</option>
+                                        {settings.providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name} · {provider.model}</option>)}
+                                    </select>
                                 </span>
                                 <span className="menu-right flex gap-2">
                                     <button

@@ -35,6 +35,7 @@ import { MascotPreviewHost } from "@/components/mascot/mascot-preview-host";
 import { useMusicControlsOptional } from "@/lib/music-context";
 import { PhoneResourcesApp, type ResourceSubPage } from "@/components/phone-resources-app";
 import { CheckPhoneApp } from "@/components/checkphone/checkphone-app";
+import { PhotoAlbumApp } from "@/components/photo-album-app";
 import { ShoppingApp } from "@/components/shopping/shopping-app";
 import { GameHubApp } from "@/components/game/game-hub-app";
 import { MixologyApp } from "@/components/mixology/mixology-app";
@@ -44,6 +45,7 @@ import { AppMarketApp } from "@/components/app-market/app-market-app";
 import { CustomAppRunner } from "@/components/app-market/custom-app-runner";
 import { CustomAppForegroundBoundary } from "@/components/app-market/custom-app-failure";
 import { hydrateKvDb, kvGet, kvSet, kvRemove, kvKeysWithPrefix } from "@/lib/kv-db";
+import { useEdgeSwipeBack } from "@/lib/use-edge-swipe-back";
 import { deleteDatabase } from "@/lib/data-management/idb";
 import { hydrateStoryStorage } from "@/lib/story-storage";
 import { hydrateMomentsStorage } from "@/lib/moments-storage";
@@ -123,6 +125,7 @@ import {
   type DesktopPageKey,
 } from "@/lib/desktop-layout-storage";
 import { WidgetRenderer } from "@/components/widgets/widget-renderer";
+import { DIYWidgetEditor } from "@/components/widgets/diy-widget-editor";
 import type { DIYWidgetTemplate } from "@/lib/widget-types";
 import { DebugPromptPanel } from "@/components/debug-prompt-panel";
 import { QuickActionFloat } from "@/components/quick-action-float";
@@ -141,7 +144,7 @@ import { startWeixinCloudRealtimeSync } from "@/lib/weixin-cloud-sync";
 import { sendBrowserNotification } from "@/lib/browser-notification";
 import type { ChatSharePayload } from "@/lib/chat-share";
 import { completePendingMcpOAuthCallback } from "@/lib/tool-executor";
-import { LayoutGrid, LoaderCircle, RefreshCw } from "lucide-react";
+import { LayoutGrid, LoaderCircle, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
 
 const EMOJI_FONTS = '"Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", "Twemoji Mozilla"';
 
@@ -1058,6 +1061,7 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   const [glassPaintPass, setGlassPaintPass] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
   const [activeApp, setActiveApp] = useState<DesktopIconId | null>(null);
+  useEdgeSwipeBack(() => setActiveApp(null), activeApp !== null, { priority: -100 });
   const [customApps, setCustomApps] = useState<InstalledCustomApp[]>([]);
   // 自定义 APP 桌面图标样式偏好（global = 忽略上传图标走全局效果）
   const [customAppIconStyles, setCustomAppIconStyles] = useState<Record<string, CustomAppIconStyle>>({});
@@ -1166,6 +1170,7 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   const [editMode, setEditMode] = useState(false);
   const [showWidgetPicker, setShowWidgetPicker] = useState(false);
   const [diyTemplates, setDiyTemplates] = useState<DIYWidgetTemplate[]>([]);
+  const [editingDiyTemplate, setEditingDiyTemplate] = useState<DIYWidgetTemplate | undefined>(undefined);
 
   useEffect(() => {
     if (showWidgetPicker) {
@@ -1184,7 +1189,7 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
     return [...WIDGET_CATALOG, ...diyEntries];
   }, [diyTemplates]);
 
-  const [widgetPickerTab, setWidgetPickerTab] = useState<"standard" | "freestyle">("standard");
+  const [widgetPickerTab, setWidgetPickerTab] = useState<"standard" | "freestyle" | "create">("standard");
   const [showDesktopCustomizer, setShowDesktopCustomizer] = useState(false);
   const pageKeys = useMemo(() => getDesktopPageKeysForState(layout, widgets), [layout, widgets]);
   const pageCount = pageKeys.length;
@@ -1423,12 +1428,6 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
     return [
       `:root {`,
       `  --app-font-family: ${family};`,
-      `}`,
-      `html body,`,
-      `html body *,`,
-      `html body *::before,`,
-      `html body *::after {`,
-      `  font-family: ${family} !important;`,
       `}`
     ].join("\n");
   }, [fontDataUrl, themeFontFamily]);
@@ -2049,7 +2048,9 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
     document.head.appendChild(node);
   }, [draftTheme.globalCustomCSS]);
 
-  // Uploaded fonts are an explicit global override. Keep this after user CSS.
+  // Uploaded fonts define the global inherited default. Do not force every
+  // descendant with !important: app/session CSS must remain able to choose a
+  // local font without disabling the user's global font everywhere else.
   useInsertionEffect(() => {
     const id = "ai-phone-uploaded-font-override";
     let node = document.getElementById(id) as HTMLStyleElement | null;
@@ -3480,6 +3481,37 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     setCurrentPageIndex((index) => Math.min(index, Math.max(0, trimmedPageCount - 1)));
   }
 
+  function addWidgetToCurrentPage(type: WidgetType, size: WidgetInstance["size"]): boolean {
+    const page = currentPage;
+    const pageKey = currentPageKey;
+    const currentWidgets = widgetsRef.current;
+    const grid = buildOccupancyGrid(layoutRef.current[pageKey] ?? [], currentWidgets, page);
+    for (let row = 1; row <= GRID_ROWS; row++) {
+      for (let col = 1; col <= GRID_COLS; col++) {
+        if (!canPlaceWidget(grid, size, row, col)) continue;
+        handleWidgetsChange(placeWidget(currentWidgets, { type, size, page, row, col }));
+        return true;
+      }
+    }
+    setNotice("当前页面没有足够空间");
+    return false;
+  }
+
+  function saveDiyTemplate(template: DIYWidgetTemplate, addAfterSave: boolean): void {
+    const updated = diyTemplates.some((item) => item.id === template.id)
+      ? diyTemplates.map((item) => item.id === template.id ? template : item)
+      : [...diyTemplates, template];
+    saveDIYTemplates(updated);
+    setDiyTemplates(updated);
+    setEditingDiyTemplate(undefined);
+    if (addAfterSave && addWidgetToCurrentPage(template.id as WidgetType, template.size)) {
+      setShowWidgetPicker(false);
+      setNotice(`已添加“${template.name}”`);
+      return;
+    }
+    setWidgetPickerTab("freestyle");
+  }
+
   function handleThemeDesktopChange(next: { widgets: WidgetInstance[]; iconLayout: DesktopLayout; dock?: DesktopIconId[]; folders?: DesktopFolderMap }): void {
     const normalizedWidgets = sanitizeWidgetsForLayout(next.iconLayout, next.widgets);
     // 对账快照：用户此刻拥有的全部图标（页面 ∪ dock ∪ 文件夹成员）。
@@ -4080,6 +4112,10 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
 
     if (activeApp === "checkphone") {
       return <CheckPhoneApp onClose={() => setActiveApp(null)} />;
+    }
+
+    if (activeApp === "photos") {
+      return <PhotoAlbumApp onClose={() => setActiveApp(null)} onNotice={setNotice} />;
     }
 
     if (activeApp === "shopping") {
@@ -4818,21 +4854,25 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
               {showWidgetPicker && (
                 <div className="widget-picker-sheet" onClick={e => e.stopPropagation()}>
                   <div className="wm-header" style={{ position: 'relative', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span className="ts-16 font-medium text-[var(--c-text-title)] flex items-center gap-2">
+                    <span className="widget-picker-title ts-16 font-medium flex items-center gap-2">
                       <LayoutGrid size={18} /> 添加组件
                     </span>
-                    <button className="ui-bare-btn text-[var(--c-icon)]" onClick={() => setShowWidgetPicker(false)}>✕</button>
+                    <button className="widget-picker-close ui-bare-btn" onClick={() => { setShowWidgetPicker(false); setEditingDiyTemplate(undefined); }}>✕</button>
                   </div>
 
                   <div className="px-4 py-3 flex gap-2 w-full">
                     {[
-                      { id: "standard", label: "全局套件" },
-                      { id: "freestyle", label: "自由艺术" },
+                      { id: "standard", label: "原版预设" },
+                      { id: "freestyle", label: "自由组件" },
+                      { id: "create", label: "自己创建" },
                     ].map(tab => (
                       <button
                         key={tab.id}
-                        onClick={() => setWidgetPickerTab(tab.id as "standard" | "freestyle")}
-                        className={`flex-1 flex justify-center py-1.5 rounded-full text-[calc(13px*var(--app-text-scale,1))] font-medium transition-colors ${widgetPickerTab === tab.id ? 'bg-gray-800 text-white' : 'bg-gray-100 text-gray-600'}`}
+                        onClick={() => {
+                          setWidgetPickerTab(tab.id as "standard" | "freestyle" | "create");
+                          if (tab.id === "create") setEditingDiyTemplate(undefined);
+                        }}
+                        className={`widget-picker-tab flex-1 flex justify-center py-1.5 rounded-full text-[calc(13px*var(--app-text-scale,1))] font-medium transition-colors ${widgetPickerTab === tab.id ? 'is-active' : ''}`}
                       >
                         {tab.label}
                       </button>
@@ -4849,22 +4889,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                           className={`wm-cat-item ${sizeClass}`}
                           role="button"
                           onClick={() => {
-                            const page = currentPage;
-                            const pageKey = currentPageKey;
-                            const currentWidgets = widgetsRef.current;
-                            const grid = buildOccupancyGrid(layoutRef.current[pageKey] ?? [], currentWidgets, page);
-                            let placed = false;
-                            for (let r = 1; r <= GRID_ROWS && !placed; r++) {
-                              for (let c = 1; c <= GRID_COLS && !placed; c++) {
-                                if (canPlaceWidget(grid, entry.size, r, c)) {
-                                  const next = placeWidget(currentWidgets, { type: entry.type, size: entry.size, page, row: r, col: c });
-                                  handleWidgetsChange(next);
-                                  placed = true;
-                                }
-                              }
-                            }
-                            if (!placed) setNotice("当前页面没有足够空间");
-                            setShowWidgetPicker(false);
+                            if (addWidgetToCurrentPage(entry.type, entry.size)) setShowWidgetPicker(false);
                           }}
                         >
                           <WidgetRenderer widget={dummyWidget} preview />
@@ -4883,35 +4908,63 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                           className={`wm-cat-item ${sizeClass} relative`}
                           style={{ overflow: "visible" }}
                         >
-                          {/* Delete button removed from desktop picker layout per user request */}
                           <div
                             role="button"
                             className="w-full h-full flex flex-col items-center gap-2"
                             onClick={() => {
-                            const page = currentPage;
-                            const pageKey = currentPageKey;
-                            const currentWidgets = widgetsRef.current;
-                            const grid = buildOccupancyGrid(layoutRef.current[pageKey] ?? [], currentWidgets, page);
-                            let placed = false;
-                            for (let r = 1; r <= GRID_ROWS && !placed; r++) {
-                              for (let c = 1; c <= GRID_COLS && !placed; c++) {
-                                if (canPlaceWidget(grid, entry.size, r, c)) {
-                                  const next = placeWidget(currentWidgets, { type: entry.type, size: entry.size, page, row: r, col: c });
-                                  handleWidgetsChange(next);
-                                  placed = true;
-                                }
-                              }
-                            }
-                            if (!placed) setNotice("当前页面没有足够空间");
-                            setShowWidgetPicker(false);
-                          }}
-                        >
-                          <WidgetRenderer widget={dummyWidget} preview />
-                          <span className="wm-cat-name" style={{ color: "var(--c-home-pink)" }}>{entry.name}</span>
-                        </div>
+                              if (addWidgetToCurrentPage(entry.type, entry.size)) setShowWidgetPicker(false);
+                            }}
+                          >
+                            <WidgetRenderer widget={dummyWidget} preview />
+                            <span className="wm-cat-name" style={{ color: "var(--c-home-pink)" }}>{entry.name}</span>
+                          </div>
+                          {isDIY && (
+                            <div className="widget-diy-actions" aria-label={`管理 ${entry.name}`}>
+                              <button type="button" onClick={(event) => {
+                                event.stopPropagation();
+                                const target = diyTemplates.find((item) => item.id === entry.type);
+                                setEditingDiyTemplate(target);
+                                setWidgetPickerTab("create");
+                              }} aria-label={`编辑 ${entry.name}`}><Pencil size={13} /></button>
+                              <button type="button" onClick={(event) => {
+                                event.stopPropagation();
+                                if (!window.confirm(`删除“${entry.name}”？桌面上已添加的同款组件也会一起移除。`)) return;
+                                const updated = diyTemplates.filter((item) => item.id !== entry.type);
+                                saveDIYTemplates(updated);
+                                setDiyTemplates(updated);
+                                handleWidgetsChange(widgetsRef.current.filter((item) => item.type !== entry.type));
+                              }} aria-label={`删除 ${entry.name}`}><Trash2 size={13} /></button>
+                            </div>
+                          )}
                       </div>
                     );
                   })}
+
+                    {widgetPickerTab === "create" && (
+                      <div className="widget-create-pane">
+                        {!editingDiyTemplate && (
+                          <div className="widget-create-intro">
+                            <span className="widget-create-icon"><Plus size={20} /></span>
+                            <div>
+                              <strong>做一个只属于你的组件</strong>
+                              <p>选一张图就能创建；需要动效或交互时，再使用 HTML / CSS。</p>
+                            </div>
+                          </div>
+                        )}
+                        <DIYWidgetEditor
+                          template={editingDiyTemplate}
+                          onClose={() => {
+                            if (editingDiyTemplate) {
+                              setEditingDiyTemplate(undefined);
+                              setWidgetPickerTab("freestyle");
+                            } else {
+                              setWidgetPickerTab("standard");
+                            }
+                          }}
+                          onSave={(template) => saveDiyTemplate(template, !editingDiyTemplate)}
+                        />
+                      </div>
+                    )}
                   </div>
                 </div>
               )}

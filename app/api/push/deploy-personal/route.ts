@@ -20,6 +20,7 @@ type DeployRequest = {
   screenChatCode?: string;
   roleMemoryMcpCode?: string;
   schemaSql?: string;
+  schemaV6Sql?: string;
 };
 
 async function upstreamMessage(response: Response): Promise<string> {
@@ -55,7 +56,7 @@ async function deployFunction(params: {
 async function assertDedicatedProject(params: {
   projectRef: string;
   token: string;
-}): Promise<{ ok: true } | { ok: false; status: number; error: string }> {
+}): Promise<{ ok: true; initialized: boolean } | { ok: false; status: number; error: string }> {
   const response = await fetch(`https://api.supabase.com/v1/projects/${params.projectRef}/database/query`, {
     method: "POST",
     headers: {
@@ -77,7 +78,8 @@ async function assertDedicatedProject(params: {
             ])
         ) then 'personal-cloud-safe-v2'
         else 'shared-project-blocked'
-      end as deployment_guard`,
+      end as deployment_guard,
+      to_regclass('public.ai_phone_cloud_meta') is not null as initialized`,
       read_only: true,
     }),
   });
@@ -85,7 +87,7 @@ async function assertDedicatedProject(params: {
     return { ok: false, status: response.status, error: await upstreamMessage(response) };
   }
 
-  const rows = await response.json().catch(() => null) as Array<{ deployment_guard?: unknown }> | null;
+  const rows = await response.json().catch(() => null) as Array<{ deployment_guard?: unknown; initialized?: unknown }> | null;
   const guard = Array.isArray(rows) && typeof rows[0]?.deployment_guard === "string"
     ? rows[0].deployment_guard
     : "";
@@ -99,7 +101,7 @@ async function assertDedicatedProject(params: {
   if (guard !== "personal-cloud-safe-v2") {
     return { ok: false, status: 502, error: "无法确认目标项目为独立个人云，已中止部署。" };
   }
-  return { ok: true };
+  return { ok: true, initialized: rows?.[0]?.initialized === true };
 }
 
 export async function POST(request: Request) {
@@ -119,6 +121,7 @@ export async function POST(request: Request) {
   const screenChatCode = typeof payload.screenChatCode === "string" ? payload.screenChatCode : "";
   const roleMemoryMcpCode = typeof payload.roleMemoryMcpCode === "string" ? payload.roleMemoryMcpCode : "";
   const schemaSql = typeof payload.schemaSql === "string" ? payload.schemaSql : "";
+  const schemaV6Sql = typeof payload.schemaV6Sql === "string" ? payload.schemaV6Sql : "";
 
   if (!/^[a-z0-9]{15,40}$/.test(projectRef)) {
     return NextResponse.json({ ok: false, error: "Supabase 项目标识无效。" }, { status: 400 });
@@ -160,6 +163,15 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: false, error: "屏幕速聊入口部署包无效。" }, { status: 400 });
   }
   if (
+    !schemaV6Sql.startsWith("-- ai-phone-personal-push-schema-v6-migration")
+    || !schemaV6Sql.includes("begin;")
+    || !schemaV6Sql.includes("public.ai_phone_schema_v6_health()")
+    || !schemaV6Sql.trimEnd().endsWith("commit;")
+    || schemaV6Sql.length > 120_000
+  ) {
+    return NextResponse.json({ ok: false, error: "个人云 v6 数据库迁移脚本无效。" }, { status: 400 });
+  }
+  if (
     !roleMemoryMcpCode.includes("角色记忆交接 MCP")
     || !roleMemoryMcpCode.includes("Deno.serve")
     || roleMemoryMcpCode.length > 600_000
@@ -186,21 +198,32 @@ export async function POST(request: Request) {
       );
     }
 
-    // 数据库升级全部为向后兼容的新增项。先升级表，再替换函数，避免新网关在
-    // role_memory_token 字段尚未创建的几秒内影响原有离线推送。
-    const query = schemaSql.replaceAll("__PROJECT_REF__", projectRef);
-    const database = await fetch(`https://api.supabase.com/v1/projects/${projectRef}/database/query`, {
+    // Full schema is only for a genuinely new personal-cloud project. Existing
+    // projects run the minimal transactional v6 migration and therefore do not
+    // recreate unrelated constraints, screen-chat functions or cron jobs.
+    if (!dedicatedProject.initialized) {
+      const initialDatabase = await fetch(`https://api.supabase.com/v1/projects/${projectRef}/database/query`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ query: schemaSql.replaceAll("__PROJECT_REF__", projectRef), read_only: false }),
+      });
+      if (!initialDatabase.ok) {
+        return NextResponse.json(
+          { ok: false, step: "初始化离线推送数据库失败", error: await upstreamMessage(initialDatabase) },
+          { status: initialDatabase.status },
+        );
+      }
+    }
+
+    const migration = await fetch(`https://api.supabase.com/v1/projects/${projectRef}/database/query`, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ query, read_only: false }),
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ query: schemaV6Sql, read_only: false }),
     });
-    if (!database.ok) {
+    if (!migration.ok) {
       return NextResponse.json(
-        { ok: false, step: "初始化离线推送数据库失败", error: await upstreamMessage(database) },
-        { status: database.status },
+        { ok: false, step: "升级个人云数据库到 v6 失败", error: await upstreamMessage(migration) },
+        { status: migration.status },
       );
     }
 
