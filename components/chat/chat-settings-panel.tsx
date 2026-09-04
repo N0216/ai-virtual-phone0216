@@ -446,6 +446,7 @@ export function ChatSettingsPanel({
     const [showComputer, setShowComputer] = useState(false);
     const [showCharacterTools, setShowCharacterTools] = useState(false);
     const [showCallHistory, setShowCallHistory] = useState(false);
+    const [showCallAppearance, setShowCallAppearance] = useState(false);
     const [roleToolCount, setRoleToolCount] = useState(() => session.isGroup ? 0 : getRoleToolChatEnabledCount(session.contactId));
     const [searchQuery, setSearchQuery] = useState("");
     const [submittedSearchQuery, setSubmittedSearchQuery] = useState("");
@@ -873,6 +874,16 @@ export function ChatSettingsPanel({
                         </button>
                     )}
                     {!session.isGroup && (
+                        <button className="menu-item" onClick={() => setShowCallAppearance(true)}>
+                            <ChatInfoIcon icon={Video} color={BINDING_ACCENTS.voice} />
+                            <div className="menu-label-group">
+                                <span className="menu-label">独立通话设置</span>
+                                <span className="menu-desc">设置这个角色自己的通话画面、字幕与语言</span>
+                            </div>
+                            <div className="menu-right"><ChevronRight size={16} /></div>
+                        </button>
+                    )}
+                    {!session.isGroup && (
                         <button className="menu-item" onClick={() => setShowCharacterTools(true)}>
                             <ChatInfoIcon icon={Wrench} color={BINDING_ACCENTS.api} />
                             <div className="menu-label-group">
@@ -992,52 +1003,23 @@ export function ChatSettingsPanel({
                                 />
                             </div>
                         </div>
-                        <div className="menu-item">
-                            <ChatInfoIcon icon={Code} color={BINDING_ACCENTS.preset} />
-                            <div className="menu-label-group">
-                                <span className="menu-label">原生状态栏</span>
-                                <span className="menu-desc">{statusPresetSupported ? "状态数值的默认外观；内心独白由上方独立控制" : "当前预设未声明状态区宏，仅默认预设支持"}</span>
-                            </div>
-                            <div className="menu-right">
-                                <Toggle
-                                    checked={statusRegion.mode === "native"}
-                                    disabled={!statusPresetSupported}
-                                    onChange={c => {
-                                        if (!statusPresetSupported) return;
-                                        saveStatusRegion({
-                                            ...statusRegion,
-                                            mode: c ? "native" : (statusRegion.contract.trim() && statusRegion.renderHtml.trim() ? "custom" : "off"),
-                                        });
-                                    }}
-                                />
-                            </div>
-                        </div>
-                        {statusPresetSupported && statusRegion.mode !== "native" && (
-                            <div className="menu-item cursor-pointer" onClick={openStatusRegionDialog}>
-                                <ChatInfoIcon icon={Sparkles} color={BINDING_ACCENTS.preset} />
+                        <div className="menu-item flex-col !items-stretch">
+                            <div className="flex items-center gap-3">
+                                <ChatInfoIcon icon={Code} color={BINDING_ACCENTS.preset} />
                                 <div className="menu-label-group">
-                                    <span className="menu-label">自定义状态栏</span>
-                                    <span className="menu-desc">{isCustomStatusRegionActive(statusRegion)
-                                        ? "已启用——点此编辑契约与渲染"
-                                        : statusRegion.contract.trim() && statusRegion.renderHtml.trim()
-                                            ? "已停用——配置保留，拨开关重新启用"
-                                            : "未配置——点此填写契约与渲染"}</span>
-                                </div>
-                                <div className="menu-right" onClick={e => e.stopPropagation()}>
-                                    <Toggle
-                                        checked={isCustomStatusRegionActive(statusRegion)}
-                                        onChange={c => {
-                                            if (!c) { saveStatusRegion({ ...statusRegion, mode: "off" }); return; }
-                                            if (statusRegion.contract.trim() && statusRegion.renderHtml.trim()) {
-                                                saveStatusRegion({ ...statusRegion, mode: "custom" });
-                                            } else {
-                                                openStatusRegionDialog(); // 还没配置：先进弹窗填，保存即启用
-                                            }
-                                        }}
-                                    />
+                                    <span className="menu-label">内心与状态显示方式</span>
+                                    <span className="menu-desc">严格二选一；选择自定义后不会再叠加原生便利贴</span>
                                 </div>
                             </div>
-                        )}
+                            <div className="grid grid-cols-2 gap-2 pt-3" role="radiogroup" aria-label="内心与状态显示方式">
+                                <button type="button" role="radio" aria-checked={statusRegion.mode !== "custom"} disabled={!statusPresetSupported} className={`ui-btn ${statusRegion.mode !== "custom" ? "ui-btn-soft-action" : "ui-btn-outline"}`} onClick={() => saveStatusRegion({ ...statusRegion, mode: "native" })}>原生显示</button>
+                                <button type="button" role="radio" aria-checked={statusRegion.mode === "custom"} disabled={!statusPresetSupported} className={`ui-btn ${statusRegion.mode === "custom" ? "ui-btn-soft-action" : "ui-btn-outline"}`} onClick={() => {
+                                    if (statusRegion.contract.trim() && statusRegion.renderHtml.trim()) saveStatusRegion({ ...statusRegion, mode: "custom" });
+                                    else openStatusRegionDialog();
+                                }}>自定义渲染</button>
+                            </div>
+                            {statusPresetSupported && <button type="button" className="menu-desc mt-2 text-left underline" onClick={openStatusRegionDialog}>{isCustomStatusRegionActive(statusRegion) ? "编辑当前自定义渲染" : "编辑自定义契约与外观"}</button>}
+                        </div>
                     </div>
                 )}
 
@@ -1898,6 +1880,30 @@ export function ChatSettingsPanel({
                     characterName={characterName}
                     onClose={() => setShowCallHistory(false)}
                 />
+            )}
+
+            {showCallAppearance && !session.isGroup && (
+                <div className="absolute inset-0 z-[10020] bg-[var(--c-page-body-bg)]">
+                    <PageShell title="独立通话设置" onBack={() => setShowCallAppearance(false)}>
+                        <div className="page-menu chat-info-menu">
+                            <div className="menu-group">
+                                <label className="menu-item">
+                                    <span className="menu-label-group"><span className="menu-label">通话画面</span><span className="menu-desc">只影响当前角色</span></span>
+                                    <select className="ui-input h-9 max-w-[150px] rounded-xl px-2" value={voiceCallAppearance.visualStyle} onChange={event => { const next={...voiceCallAppearance,visualStyle:event.target.value === "original" ? "original" as const : "noir" as const}; setVoiceCallAppearance(next); updateSession({voiceCallAppearance:next}); }}><option value="noir">雾核声场</option><option value="original">原版电话</option></select>
+                                </label>
+                                {voiceCallAppearance.visualStyle === "noir" && <>
+                                    <label className="menu-item"><span className="menu-label">字幕字体</span><select className="ui-input h-9 max-w-[150px] rounded-xl px-2" value={voiceCallAppearance.captionFont} onChange={event => { const next={...voiceCallAppearance,captionFont:event.target.value as "serif"|"system"|"rounded"}; setVoiceCallAppearance(next); updateSession({voiceCallAppearance:next}); }}><option value="serif">轻衬线</option><option value="system">系统清透</option><option value="rounded">柔和圆体</option></select></label>
+                                    <label className="menu-item"><span className="menu-label">呼吸雾色</span><select className="ui-input h-9 max-w-[150px] rounded-xl px-2" value={voiceCallAppearance.orbTone} onChange={event => { const next={...voiceCallAppearance,orbTone:event.target.value as "mist"|"lilac"|"blue"|"rose"}; setVoiceCallAppearance(next); updateSession({voiceCallAppearance:next}); }}><option value="mist">原版雾蓝紫</option><option value="lilac">低饱和淡紫</option><option value="blue">冷雾蓝</option><option value="rose">灰雾粉</option></select></label>
+                                    <label className="menu-item"><span className="menu-label-group"><span className="menu-label">英文排版名</span><span className="menu-desc">关闭后通话页不显示英文名</span></span><Toggle checked={voiceCallAppearance.showLatinName} onChange={checked => { const next={...voiceCallAppearance,showLatinName:checked}; setVoiceCallAppearance(next); updateSession({voiceCallAppearance:next}); }}/></label>
+                                    {voiceCallAppearance.showLatinName && <label className="menu-item flex-col !items-stretch"><span className="menu-label">自定义英文名</span><Input value={voiceCallAppearance.latinName} placeholder="留空则自动转写" onChange={event => { const next={...voiceCallAppearance,latinName:event.target.value}; setVoiceCallAppearance(next); updateSession({voiceCallAppearance:next}); }}/></label>}
+                                </>}
+                            </div>
+                            <div className="menu-group">
+                                <label className="menu-item"><span className="menu-label">通话语言</span><select className="ui-input h-9 max-w-[150px] rounded-xl px-2" value={BUILTIN_CALL_LANGUAGES.has(voiceCallLanguage)?voiceCallLanguage:"__custom__"} onChange={event => { const value=event.target.value === "__custom__" ? "custom:" : event.target.value; setVoiceCallLanguage(value); updateSession({voiceCallLanguage:value}); }}><option value="auto">自动跟随</option><option value="zh-CN">简体中文</option><option value="zh-TW">繁体中文</option><option value="en">English</option><option value="ja">日本語</option><option value="ko">한국어</option><option value="__custom__">自定义…</option></select></label>
+                            </div>
+                        </div>
+                    </PageShell>
+                </div>
             )}
 
             {/* Sub-page: Search History */}

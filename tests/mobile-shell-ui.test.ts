@@ -65,6 +65,30 @@ test("DeepSeek chat exposes scoped handoff status and tool traces", () => {
   assert.match(room, /permission_scope/);
   assert.match(room, /task\.tool_trace/);
   assert.match(room, /Eiren → DeepSeek 任务区/);
+  assert.match(room, /性格与工作风格/);
+  assert.match(room, /chatBackgroundImage/);
+  assert.match(room, /kind: "image" \| "file" \| "audio"/);
+  assert.match(room, /语音通话/);
+  assert.match(room, /视频通话/);
+});
+
+test("inner monologue appearance is mutually exclusive and offline composer stays in one row", () => {
+  const room = read("components/chat/chat-room.tsx");
+  const settings = read("components/chat/chat-settings-panel.tsx");
+  const css = read("styles/chat.css");
+  assert.match(settings, /role="radiogroup"/);
+  assert.match(settings, /原生显示/);
+  assert.match(settings, /自定义渲染/);
+  assert.match(room, /renderMsg\.innerMonologue && !customStatusActive/);
+  assert.match(room, /data-offline-input="true"/);
+  assert.match(css, /flex-wrap: nowrap/);
+});
+
+test("per-character call settings has a working subpage entry", () => {
+  const settings = read("components/chat/chat-settings-panel.tsx");
+  assert.match(settings, /setShowCallAppearance\(true\)/);
+  assert.match(settings, /title="独立通话设置"/);
+  assert.match(settings, /voiceCallAppearance/);
 });
 
 test("offline push repairs this device even when the local gate cache expired", () => {

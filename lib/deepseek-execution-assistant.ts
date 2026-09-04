@@ -18,7 +18,12 @@ export type DeepSeekExecutionAssistantConfig = {
   executorId: string;
   chatEnabled?: boolean;
   personaPrompt?: string;
+  nickname?: string;
+  avatarImage?: string;
+  chatBackgroundImage?: string;
 };
+
+export const DEEPSEEK_ASSISTANT_UPDATED_EVENT = "ai-phone-deepseek-assistant-updated";
 
 export function isForbiddenDeepSeekToolName(name: string): boolean {
   return isAlwaysForbiddenExecutionAssistantToolName(name);
@@ -48,6 +53,9 @@ export function loadDeepSeekExecutionAssistantConfig(): DeepSeekExecutionAssista
       executorId: String(parsed.executorId || DEEPSEEK_EXECUTOR_ID),
       chatEnabled: parsed.chatEnabled !== false,
       personaPrompt: String(parsed.personaPrompt || "沉稳、利落、诚实，先确认目标再行动；像现实中的执行助理一样汇报进度、结果和风险。"),
+      nickname: String(parsed.nickname || "DeepSeek助手"),
+      avatarImage: String(parsed.avatarImage || ""),
+      chatBackgroundImage: String(parsed.chatBackgroundImage || ""),
     };
   } catch {
     return { enabled: false, apiConfigId: "", executorId: DEEPSEEK_EXECUTOR_ID, chatEnabled: true, personaPrompt: "沉稳、利落、诚实，先确认目标再行动；像现实中的执行助理一样汇报进度、结果和风险。" };
@@ -57,6 +65,7 @@ export function loadDeepSeekExecutionAssistantConfig(): DeepSeekExecutionAssista
 export function saveDeepSeekExecutionAssistantConfig(config: DeepSeekExecutionAssistantConfig): void {
   initializeNewCharacterToolPolicy(config.executorId || DEEPSEEK_EXECUTOR_ID);
   kvSet(DEEPSEEK_EXECUTOR_CONFIG_KEY, JSON.stringify({ ...config, executorId: config.executorId || DEEPSEEK_EXECUTOR_ID }));
+  if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent(DEEPSEEK_ASSISTANT_UPDATED_EVENT));
 }
 
 export type DeepSeekExecutionRunnerDeps = {

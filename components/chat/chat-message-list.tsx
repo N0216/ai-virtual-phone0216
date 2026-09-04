@@ -28,7 +28,8 @@ import {
     subscribeMascotSettings,
     updateMascotSettings,
 } from "@/lib/mascot-settings";
-import { loadDeepSeekExecutionAssistantConfig } from "@/lib/deepseek-execution-assistant";
+import { DEEPSEEK_ASSISTANT_UPDATED_EVENT, loadDeepSeekExecutionAssistantConfig } from "@/lib/deepseek-execution-assistant";
+import { kvGet } from "@/lib/kv-db";
 
 /** Fallback: find last non-empty, non-system message preview when session preview is empty */
 function getLastNonEmptyPreview(sessionId: string): string {
@@ -81,9 +82,23 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
     const mascotSettings = useSyncExternalStore(subscribeMascotSettings, getMascotSettingsSnapshot, getMascotSettingsSnapshot);
     const mascotChat = useSyncExternalStore(subscribeMascotChat, getMascotChatSnapshot, getMascotChatSnapshot);
     const [mascotAvatarUrl, setMascotAvatarUrl] = useState(mascotSettings.avatarImage || DEFAULT_MASCOT_AVATAR);
+    const [deepSeekConfig, setDeepSeekConfig] = useState(loadDeepSeekExecutionAssistantConfig);
+    const [deepSeekAvatarUrl, setDeepSeekAvatarUrl] = useState("");
 
     useEffect(() => {
         setIdentity(resolveUserIdentity());
+    }, []);
+
+    useEffect(() => {
+        let live = true;
+        const refresh = () => {
+            const next = loadDeepSeekExecutionAssistantConfig();
+            setDeepSeekConfig(next);
+            void resolveMascotImageRef(next.avatarImage, "").then(url => { if (live) setDeepSeekAvatarUrl(url); });
+        };
+        refresh();
+        window.addEventListener(DEEPSEEK_ASSISTANT_UPDATED_EVENT, refresh);
+        return () => { live = false; window.removeEventListener(DEEPSEEK_ASSISTANT_UPDATED_EVENT, refresh); };
     }, []);
 
     useEffect(() => {
@@ -223,9 +238,8 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
                             const showMascot = mascotSettings.chatEnabled
                                 && listTab !== "group"
                                 && (!keyword || (mascotSettings.nickname || "AI助手").toLowerCase().includes(keyword));
-                            const deepSeekConfig = loadDeepSeekExecutionAssistantConfig();
                             const showDeepSeek = deepSeekConfig.chatEnabled !== false && listTab !== "group"
-                                && (!keyword || "deepseek助手".includes(keyword));
+                                && (!keyword || (deepSeekConfig.nickname || "DeepSeek助手").toLowerCase().includes(keyword));
                             const regularItems = [...sessions]
                             .filter(s => {
                                 if (!(s.isGroup || contactIds.has(s.contactId))) return false;
@@ -269,9 +283,9 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
                                     )}
                                     {showDeepSeek && (
                                         <MascotSessionItem
-                                            name="DeepSeek助手"
-                                            avatarUrl="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%232f6bff'/%3E%3Ctext x='32' y='41' text-anchor='middle' font-family='Arial' font-size='25' font-weight='700' fill='white'%3EDS%3C/text%3E%3C/svg%3E"
-                                            preview="低权限执行助理已就位"
+                                            name={deepSeekConfig.nickname || "DeepSeek助手"}
+                                            avatarUrl={deepSeekAvatarUrl || "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%232f6bff'/%3E%3Ctext x='32' y='41' text-anchor='middle' font-family='Arial' font-size='25' font-weight='700' fill='white'%3EDS%3C/text%3E%3C/svg%3E"}
+                                            preview={(() => { try { const rows=JSON.parse(kvGet("ai_phone_deepseek_assistant_chat_v1")||"[]") as Array<{text?:string}>; return rows.at(-1)?.text || "低权限执行助理已就位"; } catch { return "低权限执行助理已就位"; } })()}
                                             isThinking={false}
                                             onSelect={onSelectDeepSeek}
                                         />

@@ -757,6 +757,14 @@
   align-items: flex-end;
   gap: 8px;
   width: 100%;
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+
+.chat-input-bar[data-offline-input="true"] .chat-input-textarea {
+  flex: 1 1 0;
+  width: 0;
+  min-width: 0;
 }
 .chat-typing-indicator { gap: 0; animation-duration: .16s; }
 

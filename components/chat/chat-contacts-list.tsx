@@ -28,6 +28,7 @@ import {
     updateMascotSettings,
 } from "@/lib/mascot-settings";
 import { loadDeepSeekExecutionAssistantConfig } from "@/lib/deepseek-execution-assistant";
+import { DeepSeekAssistantAvatar } from "./deepseek-assistant-avatar";
 
 type ChatContactsListProps = {
     onCloseApp: () => void;
@@ -263,9 +264,9 @@ export function ChatContactsList({ onCloseApp, onSelectSession, onSelectMascot, 
                 {loadDeepSeekExecutionAssistantConfig().chatEnabled !== false && (
                     <div className="mb-3">
                         <div className="minimal-list-item" onClick={onSelectDeepSeek}>
-                            <div className="minimal-avatar-wrapper" style={{ background: "#2f6bff", color: "white", display: "grid", placeItems: "center", fontWeight: 700 }}>DS<span className="minimal-online-dot" /></div>
+                            <DeepSeekAssistantAvatar className="minimal-avatar-wrapper bg-[#2f6bff] text-white grid place-items-center font-bold overflow-hidden" />
                             <div className="flex-1 overflow-hidden h-[48px] flex flex-col justify-center gap-1">
-                                <div className="ts-16 font-medium text-[var(--c-text-title)] truncate">DeepSeek助手</div>
+                                <div className="ts-16 font-medium text-[var(--c-text-title)] truncate">{loadDeepSeekExecutionAssistantConfig().nickname || "DeepSeek助手"}</div>
                                 <div className="ts-13 text-[var(--c-text)] opacity-80 truncate font-normal">低权限执行助理</div>
                             </div>
                         </div>

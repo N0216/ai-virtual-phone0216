@@ -1079,8 +1079,19 @@ const OfflineTextInputBar = memo(forwardRef<OfflineTextInputHandle, {
     };
 
     return (
-        <div className="chat-input-bar chat-room-main-pane flex flex-col" data-ui="input">
-            <textarea
+        <div className="chat-input-bar chat-room-main-pane flex flex-col" data-ui="input" data-offline-input="true">
+            <div className="chat-composer-row">
+                <button
+                    type="button"
+                    onClick={onToggleOfflineMode}
+                    disabled={isOfflineGenerating}
+                    className="ui-bare-btn chat-composer-action text-[var(--c-text)]"
+                    aria-label="返回线上模式"
+                    title="返回线上模式"
+                >
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4Z" /><path d="M8 9h8" /><path d="M8 13h5" /></svg>
+                </button>
+                <textarea
                 ref={textareaRef}
                 rows={1}
                 value={inputText}
@@ -1108,26 +1119,11 @@ const OfflineTextInputBar = memo(forwardRef<OfflineTextInputHandle, {
                 className="chat-input-textarea"
                 disabled={isSpectator}
                 placeholder={isSpectator ? "围观中，点右侧按钮推进他们的线下互动" : undefined}
-            />
-            <div className="chat-input-actions">
-                <button
-                    type="button"
-                    onClick={onToggleOfflineMode}
-                    disabled={isOfflineGenerating}
-                    className="ui-bare-btn text-[var(--c-text)]"
-                    aria-label="返回线上模式"
-                    title="返回线上模式"
-                >
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                        <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4Z" />
-                        <path d="M8 9h8" />
-                        <path d="M8 13h5" />
-                    </svg>
-                </button>
+                />
                 <button
                     onClick={onToggleEmojiPanel}
                     disabled={isSpectator}
-                    className="ui-bare-btn text-[var(--c-text)]"
+                    className="ui-bare-btn chat-composer-action text-[var(--c-text)]"
                     style={isSpectator ? { opacity: 0.35 } : undefined}
                     aria-label="表情"
                     title="表情"
@@ -1138,7 +1134,7 @@ const OfflineTextInputBar = memo(forwardRef<OfflineTextInputHandle, {
                     type="button"
                     onClick={() => { if (isOfflineGenerating) onStopGeneration(); else handleSubmit(); }}
                     disabled={!isOfflineGenerating && !isSpectator && !inputText.trim()}
-                    className="ui-bare-btn text-[var(--c-text)]"
+                    className="ui-bare-btn chat-composer-action text-[var(--c-text)]"
                     aria-label={isOfflineGenerating ? "停止线下生成" : "发送"}
                     title={isOfflineGenerating ? "停止线下生成" : "发送"}
                 >
@@ -6057,8 +6053,13 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                                         <StateValuesPanel stateValues={cardStateValues} />
                                     )}
                                     {renderMsg.statusPanel && (
-                                        msg.statusRegionMode === "custom" && statusRegionCfg.renderHtml.trim() ? (
-                                            <CustomStatusFrame html={statusRegionCfg.renderHtml} raw={renderMsg.statusPanel} />
+                                        customStatusActive && statusRegionCfg.renderHtml.trim() ? (
+                                            <CustomStatusFrame
+                                                html={statusRegionCfg.renderHtml}
+                                                raw={renderMsg.innerMonologue && !renderMsg.statusPanel.includes(renderMsg.innerMonologue)
+                                                    ? `${renderMsg.statusPanel}\n内心独白=${renderMsg.innerMonologue}`
+                                                    : renderMsg.statusPanel}
+                                            />
                                         ) : (
                                             <BilingualTextBlock text={msg.displayProjected ? renderMsg.statusPanel : renderDisplayText(renderMsg.statusPanel, 6, false)} mode="markdown" defaultExpanded={session.collapseBilingualTranslation !== false ? false : true} />
                                         )
@@ -6066,7 +6067,7 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                                 </div>
                             )}
                             {/* Inner monologue card (sticky note / journal style) */}
-                            {hasFoldedPanel && expandedMonologueId === msg.id && renderMsg.innerMonologue && (
+                            {hasFoldedPanel && expandedMonologueId === msg.id && renderMsg.innerMonologue && !customStatusActive && (
                                 <div className="chat-thought-card">
                                     {/* Decorative washi tape */}
                                     <div className="chat-thought-tape-left" />
