@@ -19,7 +19,19 @@ type EdgeSwipeOptions = {
 const registrations = new Map<symbol, Registration>();
 let nextOrder = 0;
 let listenersInstalled = false;
-let gesture: { x: number; y: number; owner: Registration } | null = null;
+type ActiveGesture = {
+    x: number;
+    y: number;
+    lastX: number;
+    lastTime: number;
+    owner: Registration;
+    surface: HTMLElement | null;
+    axis: "pending" | "x" | "y";
+};
+
+let gesture: ActiveGesture | null = null;
+let settleTimer: number | null = null;
+let settlingSurface: HTMLElement | null = null;
 
 function hasHorizontalGestureOwner(element: Element | null): boolean {
     let current: Element | null = element;
@@ -28,11 +40,54 @@ function hasHorizontalGestureOwner(element: Element | null): boolean {
             const style = window.getComputedStyle(current);
             const scrollableX = /^(auto|scroll)$/.test(style.overflowX)
                 && current.scrollWidth > current.clientWidth + 2;
-            if (scrollableX || style.touchAction === "pan-x") return true;
+            // A horizontal scroller only owns the gesture while it can still
+            // move towards its start. At its left edge, let the app-level back
+            // gesture take over, just like native iOS navigation.
+            if (scrollableX && current.scrollLeft > 2) return true;
         }
         current = current.parentElement;
     }
     return false;
+}
+
+function resolveSurface(owner: Registration, element: Element | null): HTMLElement | null {
+    const registeredRoot = owner.root();
+    if (registeredRoot) return registeredRoot;
+    if (!(element instanceof HTMLElement)) return null;
+    return element.closest<HTMLElement>(".chat-app, .phone-app-pane, .page-shell");
+}
+
+function clearSettleTimer(): void {
+    if (settleTimer !== null) window.clearTimeout(settleTimer);
+    settleTimer = null;
+    settlingSurface?.classList.remove("edge-swipe-back-surface", "edge-swipe-back-settling");
+    settlingSurface?.style.removeProperty("--edge-swipe-back-x");
+    settlingSurface = null;
+}
+
+function setSurfaceOffset(surface: HTMLElement | null, offset: number): void {
+    if (!surface) return;
+    surface.classList.add("edge-swipe-back-surface");
+    surface.style.setProperty("--edge-swipe-back-x", `${Math.max(0, Math.round(offset))}px`);
+}
+
+function finishSurface(surface: HTMLElement | null, commit: boolean, onDone?: () => void): void {
+    clearSettleTimer();
+    if (!surface) {
+        onDone?.();
+        return;
+    }
+    surface.classList.add("edge-swipe-back-settling");
+    settlingSurface = surface;
+    const destination = commit ? Math.max(96, Math.round(surface.getBoundingClientRect().width * 0.28)) : 0;
+    setSurfaceOffset(surface, destination);
+    settleTimer = window.setTimeout(() => {
+        surface.classList.remove("edge-swipe-back-surface", "edge-swipe-back-settling");
+        surface.style.removeProperty("--edge-swipe-back-x");
+        settleTimer = null;
+        settlingSurface = null;
+        onDone?.();
+    }, commit ? 130 : 170);
 }
 
 function shouldIgnoreGesture(element: Element | null): boolean {
@@ -60,7 +115,7 @@ function installListeners(): void {
         gesture = null;
         if (event.touches.length !== 1) return;
         const touch = event.touches[0];
-        if (touch.clientX > 28) return;
+        if (touch.clientX > 32) return;
         const element = event.target instanceof Element ? event.target : null;
         if (shouldIgnoreGesture(element)) return;
 
@@ -72,8 +127,42 @@ function installListeners(): void {
         });
         candidates.sort((a, b) => b.priority - a.priority || b.order - a.order);
         const owner = candidates[0];
-        if (owner) gesture = { x: touch.clientX, y: touch.clientY, owner };
+        if (owner) {
+            clearSettleTimer();
+            gesture = {
+                x: touch.clientX,
+                y: touch.clientY,
+                lastX: touch.clientX,
+                lastTime: performance.now(),
+                owner,
+                surface: resolveSurface(owner, element),
+                axis: "pending",
+            };
+        }
     }, { passive: true, capture: true });
+    document.addEventListener("touchmove", event => {
+        if (!gesture || event.touches.length !== 1) return;
+        const touch = event.touches[0];
+        const dx = touch.clientX - gesture.x;
+        const dy = touch.clientY - gesture.y;
+
+        if (gesture.axis === "pending" && Math.hypot(dx, dy) >= 8) {
+            gesture.axis = dx > 0 && Math.abs(dx) > Math.abs(dy) * 1.12 ? "x" : "y";
+        }
+        if (gesture.axis !== "x") return;
+
+        event.preventDefault();
+        const width = gesture.surface?.getBoundingClientRect().width || window.innerWidth;
+        const clamped = Math.min(Math.max(0, dx), width);
+        // A small resistance near the far edge keeps the transition responsive
+        // without letting a page fly away under the finger.
+        const offset = clamped <= width * 0.35
+            ? clamped * 0.72
+            : width * 0.252 + (clamped - width * 0.35) * 0.18;
+        setSurfaceOffset(gesture.surface, offset);
+        gesture.lastX = touch.clientX;
+        gesture.lastTime = performance.now();
+    }, { passive: false, capture: true });
     document.addEventListener("touchend", event => {
         if (!gesture || event.changedTouches.length === 0) return;
         const current = gesture;
@@ -81,9 +170,19 @@ function installListeners(): void {
         const touch = event.changedTouches[0];
         const dx = touch.clientX - current.x;
         const dy = Math.abs(touch.clientY - current.y);
-        if (dx >= 72 && dx > dy * 1.35 && current.owner.enabled()) current.owner.onBack();
+        const elapsed = Math.max(1, performance.now() - current.lastTime);
+        const velocity = (touch.clientX - current.lastX) / elapsed;
+        const commit = current.axis === "x"
+            && dx > dy * 1.2
+            && (dx >= 68 || (dx >= 30 && velocity >= 0.45))
+            && current.owner.enabled();
+        finishSurface(current.surface, commit, commit ? () => current.owner.onBack() : undefined);
     }, { passive: true, capture: true });
-    document.addEventListener("touchcancel", () => { gesture = null; }, { passive: true, capture: true });
+    document.addEventListener("touchcancel", () => {
+        const current = gesture;
+        gesture = null;
+        finishSurface(current?.surface ?? null, false);
+    }, { passive: true, capture: true });
 }
 
 /** iPhone 式左缘右滑返回；页面叠加时只触发触点所在的最上层页面。 */

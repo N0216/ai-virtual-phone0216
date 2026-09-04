@@ -1236,6 +1236,25 @@
     background: var(--c-page-body-bg);
   }
 
+  /* Installed PWAs have no collapsing browser chrome. On iOS (including
+     iPhone 15), 100dvh can resolve to the inset content viewport and leave a
+     strip below the phone shell. Use the large viewport only in installed or
+     fullscreen display modes; regular Safari keeps 100dvh above. */
+  @media (display-mode: standalone), (display-mode: fullscreen) {
+    :root {
+      --phone-screen-height: 100vh;
+      --phone-screen-height: 100lvh;
+    }
+
+    html,
+    body,
+    .app-root,
+    .app-root.splash-root {
+      height: 100vh;
+      height: 100lvh;
+    }
+  }
+
   .splash-shell-wrap {
     width: var(--phone-screen-width);
     transform-origin: top left;

@@ -8,7 +8,7 @@ import { ChatRoom } from "./chat-room";
 import { MascotChatRoom } from "./mascot-chat-room";
 import { UserProfilePanel } from "./user-profile-panel";
 import { MessageCircle, Users, Aperture, UserRound } from "lucide-react";
-import { ChatSession, loadChatSessions, pushChatMessage, hydrateChatStorage, markChatSessionRead, setActiveChatSessionId } from "@/lib/chat-storage";
+import { ChatSession, loadChatSessions, pushChatMessage, hydrateChatStorage, markChatSessionRead, setActiveChatSessionId, getTotalChatUnreadCount } from "@/lib/chat-storage";
 import { useEdgeSwipeBack } from "@/lib/use-edge-swipe-back";
 import { notifyMascotPageContext } from "@/lib/mascot-events";
 import { loadCharacters } from "@/lib/character-storage";
@@ -40,6 +40,7 @@ export const PhoneChatApp = memo(function PhoneChatApp({ onClose, initialSession
     const [visitedSessions, setVisitedSessions] = useState<Map<string, ChatSession>>(new Map());
     const [dbReady, setDbReady] = useState(false);
     const [hideTabBar, setHideTabBar] = useState(false);
+    const [unreadCount, setUnreadCount] = useState(0);
 
     const navigateBack = () => {
         if (activeSession) return setActiveSession(null);
@@ -59,6 +60,7 @@ export const PhoneChatApp = memo(function PhoneChatApp({ onClose, initialSession
     useEffect(() => {
         hydrateChatStorage().then(() => {
             setDbReady(true);
+            setUnreadCount(getTotalChatUnreadCount());
             // Resolve initial session after hydration
             if (initialSessionId) {
                 const s = loadChatSessions().find(s => s.id === initialSessionId);
@@ -66,6 +68,19 @@ export const PhoneChatApp = memo(function PhoneChatApp({ onClose, initialSession
             }
         });
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // Keep the bottom-tab badge in sync with the same unread counters used by
+    // the session list and desktop icon. Opening a session clears only that
+    // session, matching WeChat's read behaviour.
+    useEffect(() => {
+        const refreshUnreadCount = () => setUnreadCount(getTotalChatUnreadCount());
+        window.addEventListener("chat-unread-updated", refreshUnreadCount);
+        window.addEventListener("chat-messages-updated", refreshUnreadCount);
+        return () => {
+            window.removeEventListener("chat-unread-updated", refreshUnreadCount);
+            window.removeEventListener("chat-messages-updated", refreshUnreadCount);
+        };
+    }, []);
 
     // React to external session navigation (e.g., incoming call acceptance)
     // Only fires when initialSessionId CHANGES after mount (mount case handled by hydration above)
@@ -268,7 +283,14 @@ export const PhoneChatApp = memo(function PhoneChatApp({ onClose, initialSession
                     className={`chat-tab ${activeTab === "messages" ? "chat-tab-active" : ""}`}
                     onClick={() => setActiveTab("messages")}
                 >
-                    <MessageCircleIcon active={activeTab === "messages"} />
+                    <span className="chat-tab-icon">
+                        <MessageCircleIcon active={activeTab === "messages"} />
+                        {unreadCount > 0 ? (
+                            <span className="chat-tab-unread-badge" aria-label={`${unreadCount} 条未读消息`}>
+                                {unreadCount > 99 ? "99+" : unreadCount}
+                            </span>
+                        ) : null}
+                    </span>
                     <span style={{ fontSize: "calc(10px*var(--app-text-scale,1))", color: activeTab === "messages" ? undefined : "var(--c-text)" }}>消息</span>
                 </button>
                 <button

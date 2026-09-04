@@ -20,6 +20,19 @@ body {
   color: var(--c-text-title);
   background: var(--c-input);
   font-family: var(--app-font-family);
+  overscroll-behavior-x: none;
+}
+
+/* Shared, finger-tracking surface for the global iPhone-style edge-back
+   gesture. `translate` is independent from each app's own transform/animation. */
+.edge-swipe-back-surface {
+  translate: var(--edge-swipe-back-x, 0px) 0;
+  transition: translate 0s !important;
+  will-change: translate;
+}
+
+.edge-swipe-back-surface.edge-swipe-back-settling {
+  transition: translate 150ms cubic-bezier(0.22, 1, 0.36, 1) !important;
 }
 
 /* Disable rubber-band scroll utility */

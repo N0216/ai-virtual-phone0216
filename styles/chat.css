@@ -597,6 +597,34 @@
   color: var(--c-icon-active);
 }
 
+.chat-tab-icon {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.chat-tab-unread-badge {
+  position: absolute;
+  top: -8px;
+  left: 13px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  border: 1.5px solid color-mix(in srgb, var(--c-card) 88%, transparent);
+  border-radius: 999px;
+  background: #ff3b30;
+  color: #fff;
+  font-size: calc(9px*var(--app-text-scale,1));
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
 /* ── Typing indicator (below header title) ── */
 .chat-typing-indicator {
   position: absolute;
@@ -652,7 +680,9 @@
 }
 
 .chat-input-bar .chat-input-textarea {
-  width: 100%;
+  width: auto;
+  min-width: 0;
+  flex: 1 1 auto;
   border: 0.5px solid var(--c-input-border);
   border-radius: var(--ui-radius-card);
   background: color-mix(in srgb, var(--c-card) 60%, transparent);
@@ -722,20 +752,28 @@
   transform: scale(0.96);
 }
 
-.chat-input-bar .chat-input-actions {
+.chat-composer-row {
   display: flex;
-  justify-content: center;
-  gap: 32px;
-  padding: 6px 0 0;
+  align-items: flex-end;
+  gap: 8px;
+  width: 100%;
 }
 
-.chat-input-bar .chat-input-actions .ui-bare-btn {
+.chat-composer-action {
+  flex: 0 0 30px;
+  width: 30px;
+  height: 36px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   font-size: 0;
 }
 
-.chat-input-bar .chat-input-actions svg {
-  width: 24px;
-  height: 24px;
+.chat-composer-send {
+  border-radius: 6px;
+  color: #fff;
+  background: var(--c-icon-active);
 }
 
 .chat-offline-toggle {
@@ -1059,9 +1097,23 @@
 }
 
 .chat-back-unread-badge {
-  margin-left: var(--chat-back-unread-gap, -3px);
-  background: var(--chat-back-unread-bg, var(--chat-unread-bg));
-  color: var(--chat-back-unread-color, var(--chat-unread-color));
+  position: absolute;
+  top: 50%;
+  left: calc(100% - 1px);
+  min-width: 24px;
+  height: 24px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 999px;
+  transform: translateY(-50%);
+  background: var(--chat-back-unread-bg, rgba(96, 96, 96, 0.68));
+  color: var(--chat-back-unread-color, #fff);
+  font-size: calc(12px*var(--app-text-scale,1));
+  font-weight: 500;
+}
+
+.chat-room-wrapper .page-header-content > .page-back-btn {
+  position: relative;
 }
 
 /* Per-message timestamps stay separate from the existing conversation time
@@ -2806,12 +2858,16 @@
 
 /* ── Plus menu ── */
 .chat-plus-menu {
-  margin: 8px 0 0;
-  border-radius: var(--ui-radius-card);
+  margin: 10px -16px calc(-1 * max(8px, env(safe-area-inset-bottom, 0px)));
+  border-top: 0.5px solid var(--c-card-border);
+  border-radius: 0;
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 16px;
-  padding: 16px;
+  gap: 18px 10px;
+  padding: 20px 14px max(24px, env(safe-area-inset-bottom, 0px));
+  max-height: min(46vh, 360px);
+  overflow-y: auto;
+  background: color-mix(in srgb, var(--c-input, var(--c-page-body-bg)) 92%, transparent);
   content-visibility: auto;
   transform-origin: top center;
   animation: chatPanelExpand 180ms cubic-bezier(0.16, 1, 0.3, 1);
@@ -2819,8 +2875,8 @@
 
 /* ── Plus menu icon box ── */
 .chat-plus-icon-box {
-  width: 44px;
-  height: 44px;
+  width: 58px;
+  height: 58px;
   border-radius: 12px;
   border: 1px solid transparent;
   background: var(--c-panel);
