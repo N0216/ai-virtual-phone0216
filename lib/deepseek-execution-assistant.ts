@@ -23,6 +23,8 @@ export type DeepSeekExecutionAssistantConfig = {
   personaPrompt?: string;
   nickname?: string;
   avatarImage?: string;
+  avatarScale?: number;
+  avatarPositionY?: number;
   chatBackgroundImage?: string;
   callBackgroundImage?: string;
 };
@@ -62,6 +64,8 @@ export function loadDeepSeekExecutionAssistantConfig(): DeepSeekExecutionAssista
       personaPrompt: String(parsed.personaPrompt || "沉稳、利落、诚实，先确认目标再行动；像现实中的执行助理一样汇报进度、结果和风险。"),
       nickname: String(parsed.nickname || "DeepSeek助手"),
       avatarImage: String(parsed.avatarImage || ""),
+      avatarScale: Math.min(3, Math.max(1, Number(parsed.avatarScale) || 1)),
+      avatarPositionY: Math.min(100, Math.max(0, Number.isFinite(Number(parsed.avatarPositionY)) ? Number(parsed.avatarPositionY) : 50)),
       chatBackgroundImage: String(parsed.chatBackgroundImage || ""),
       callBackgroundImage: String(parsed.callBackgroundImage || ""),
     };

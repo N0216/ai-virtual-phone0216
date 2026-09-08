@@ -72,6 +72,9 @@ test("execution assistant uses the normal chat shell and exposes scoped handoff 
   assert.match(room, /aria-label="更多功能"[\s\S]*<svg/);
   assert.match(room, /性格与工作风格/);
   assert.match(room, /chatBackgroundImage/);
+  assert.match(room, /头像缩放/);
+  assert.match(room, /avatarPositionY/);
+  assert.match(room, /dimensions\.height > dimensions\.width \* 1\.2/);
   assert.match(room, /kind: "image" \| "file" \| "audio"/);
   assert.match(room, /语音通话/);
   assert.match(room, /视频通话/);
