@@ -1755,8 +1755,9 @@ function DraggableNode({
 
 // ── 绝密档案视图（详情页面） ─────────────────────────────────────────
 
-function CharArchiveView({
+export function CharArchiveView({
   char,
+  avatarPreview,
   isEditing = false,
   isExisting = false,
   onBack,
@@ -1770,6 +1771,8 @@ function CharArchiveView({
   dummy,
 }: {
   char: Character;
+  /** 仅用于展示无法直接作为 src 使用的本地资源引用；保存时仍保留原 avatar。 */
+  avatarPreview?: string;
   isEditing?: boolean;
   isExisting?: boolean;
   onBack: () => void;
@@ -2022,7 +2025,7 @@ function CharArchiveView({
               }}
             >
               {avatar ? (
-                <img src={avatar} alt="Avatar" />
+                <img src={avatar === char.avatar && avatarPreview ? avatarPreview : avatar} alt="Avatar" />
               ) : (
                 <CharAvatarFallback name={name || char.name} size="100%" />
               )}

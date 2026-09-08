@@ -61,20 +61,23 @@ test("built-in assistant preserves real voice and file attachments", () => {
 
 test("execution assistant uses the normal chat shell and exposes scoped handoff traces", () => {
   const room = read("components/chat/deepseek-assistant-chat-room.tsx");
+  const archive = read("components/phone-character-app.tsx");
   assert.match(room, /runNextDeepSeekExecutionTask/);
   assert.match(room, /permission_scope/);
   assert.match(room, /task\.tool_trace/);
   assert.match(room, /Eiren → 执行助理任务区/);
+  assert.match(room, /CharArchiveView/);
+  assert.match(room, /executionAssistantPersonaPrompt/);
   assert.match(room, /page-header-safe-area/);
   assert.match(room, /page-header-content/);
   assert.match(room, /aria-label="语音输入"[\s\S]*<svg/);
   assert.match(room, /aria-label="表情"[\s\S]*<svg/);
   assert.match(room, /aria-label="更多功能"[\s\S]*<svg/);
-  assert.match(room, /性格与工作风格/);
+  assert.match(archive, /PERSONA \/ TRAITS/);
+  assert.match(archive, /PERSONALITY/);
+  assert.match(archive, /BRIEF PERSONA \/ 简量人设/);
   assert.match(room, /chatBackgroundImage/);
-  assert.match(room, /头像缩放/);
   assert.match(room, /avatarPositionY/);
-  assert.match(room, /dimensions\.height > dimensions\.width \* 1\.2/);
   assert.match(room, /kind: "image" \| "file" \| "audio"/);
   assert.match(room, /语音通话/);
   assert.match(room, /视频通话/);

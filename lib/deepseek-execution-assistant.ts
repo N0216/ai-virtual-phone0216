@@ -7,6 +7,8 @@ import { getEnabledTools } from "./tool-storage";
 import { executeToolCalls, parseToolCalls } from "./tool-executor";
 import { getInternalCapability } from "./internal-capability-storage";
 import { USER_VIEW_READ_CAPABILITY_ID, isAlwaysForbiddenExecutionAssistantToolName, isRolePhoneExecutionTaskDenied, listLocalUserViewReadToolNames } from "./user-view-read";
+import type { Character } from "./character-types";
+import type { CharacterImportData } from "./character-storage";
 
 export const DEEPSEEK_EXECUTOR_ID = "deepseek-execution-assistant";
 export const DEEPSEEK_EXECUTOR_CONFIG_KEY = "ai_phone_deepseek_execution_assistant_v1";
@@ -20,7 +22,14 @@ export type DeepSeekExecutionAssistantConfig = {
   contactAdded?: boolean;
   wechatId?: string;
   isPinned?: boolean;
+  /** @deprecated 旧版简化人设字段；读取时自动并入 persona。 */
   personaPrompt?: string;
+  persona?: string;
+  personality?: string;
+  briefPersona?: string;
+  briefPersonaUpdatedAt?: string;
+  tags?: string[];
+  timeZone?: string;
   nickname?: string;
   avatarImage?: string;
   avatarScale?: number;
@@ -61,7 +70,13 @@ export function loadDeepSeekExecutionAssistantConfig(): DeepSeekExecutionAssista
       contactAdded: parsed.contactAdded === true,
       wechatId: String(parsed.wechatId || "execution_assistant"),
       isPinned: parsed.isPinned === true,
-      personaPrompt: String(parsed.personaPrompt || "沉稳、利落、诚实，先确认目标再行动；像现实中的执行助理一样汇报进度、结果和风险。"),
+      personaPrompt: String(parsed.personaPrompt || ""),
+      persona: String(parsed.persona || parsed.personaPrompt || ""),
+      personality: String(parsed.personality || ""),
+      briefPersona: String(parsed.briefPersona || ""),
+      briefPersonaUpdatedAt: String(parsed.briefPersonaUpdatedAt || ""),
+      tags: Array.isArray(parsed.tags) ? parsed.tags.map(String) : ["执行助理"],
+      timeZone: String(parsed.timeZone || ""),
       nickname: String(parsed.nickname || "DeepSeek助手"),
       avatarImage: String(parsed.avatarImage || ""),
       avatarScale: Math.min(3, Math.max(1, Number(parsed.avatarScale) || 1)),
@@ -70,8 +85,53 @@ export function loadDeepSeekExecutionAssistantConfig(): DeepSeekExecutionAssista
       callBackgroundImage: String(parsed.callBackgroundImage || ""),
     };
   } catch {
-    return { enabled: false, apiConfigId: "", executorId: DEEPSEEK_EXECUTOR_ID, chatEnabled: false, contactAdded: false, wechatId: "execution_assistant", personaPrompt: "沉稳、利落、诚实，先确认目标再行动；像现实中的执行助理一样汇报进度、结果和风险。" };
+    return { enabled: false, apiConfigId: "", executorId: DEEPSEEK_EXECUTOR_ID, chatEnabled: false, contactAdded: false, wechatId: "execution_assistant", personaPrompt: "", persona: "", personality: "", briefPersona: "", tags: ["执行助理"] };
   }
+}
+
+export function executionAssistantCharacter(config: DeepSeekExecutionAssistantConfig): Character {
+  return {
+    id: config.executorId || DEEPSEEK_EXECUTOR_ID,
+    name: config.nickname || "执行助理",
+    avatar: config.avatarImage || null,
+    persona: config.persona || config.personaPrompt || "",
+    personality: config.personality || undefined,
+    briefPersona: config.briefPersona || undefined,
+    briefPersonaUpdatedAt: config.briefPersonaUpdatedAt || undefined,
+    wechatID: config.wechatId || "execution_assistant",
+    timeZone: config.timeZone || undefined,
+    tags: config.tags?.length ? config.tags : ["执行助理"],
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+export function applyExecutionAssistantCharacter(
+  config: DeepSeekExecutionAssistantConfig,
+  data: CharacterImportData,
+): DeepSeekExecutionAssistantConfig {
+  return {
+    ...config,
+    nickname: data.name,
+    avatarImage: data.avatar || "",
+    persona: data.persona,
+    // 同步旧字段，避免尚未升级的运行包丢失人设。
+    personaPrompt: data.persona,
+    personality: data.personality || "",
+    briefPersona: data.briefPersona || "",
+    briefPersonaUpdatedAt: data.briefPersonaUpdatedAt || "",
+    tags: data.tags || [],
+    timeZone: data.timeZone || "",
+    wechatId: data.wechatID || config.wechatId || "execution_assistant",
+  };
+}
+
+export function executionAssistantPersonaPrompt(config: DeepSeekExecutionAssistantConfig): string {
+  return [
+    config.persona || config.personaPrompt || "",
+    config.personality ? `【独立性格与语言风格】\n${config.personality}` : "",
+    config.briefPersona ? `【简量人设】\n${config.briefPersona}` : "",
+  ].filter(Boolean).join("\n\n");
 }
 
 export function saveDeepSeekExecutionAssistantConfig(config: DeepSeekExecutionAssistantConfig): void {
@@ -133,6 +193,7 @@ export async function runNextDeepSeekExecutionTask(
     .filter(name => task.permission_scope.includes(name) && !isForbiddenDeepSeekToolName(name));
   const system = [
     "你是 Eiren 的低权限执行助理，只负责查、筛、执行和整理结构化结果。",
+    executionAssistantPersonaPrompt(config),
     "不得冒充 Eiren，不得进行关系判断或感情表达，不得写 Long Term Memory / Self Memory，不得扩张权限。",
     `本任务唯一允许的工具：${enabled.length ? enabled.join("、") : "无"}。`,
     "需要工具时输出 [执行动作:工具名({参数JSON})]；完成时直接输出简洁结构化结果。",

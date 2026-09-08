@@ -77,10 +77,10 @@ export function DeepSeekExecutionSettings() {
           <span className="menu-label">助理微信号</span>
           <input className="ui-input" value={config.wechatId || ""} onChange={event => saveConfig({ wechatId: event.target.value.trim() })} placeholder="execution_assistant" />
         </label>
-        <label className="flex flex-col gap-1">
-          <span className="menu-label">性格与工作风格</span>
-          <textarea className="ui-textarea min-h-24" value={config.personaPrompt || ""} onChange={event => saveConfig({ personaPrompt: event.target.value })} placeholder="例如：沉稳、简洁、主动汇报风险……" />
-        </label>
+        <div className="rounded-xl bg-black/[0.03] px-3 py-2">
+          <div className="menu-label">完整角色档案</div>
+          <div className="menu-desc !mt-1">添加到微信后，在助理聊天右上角“…”进入资料，使用与普通角色相同的档案编辑器设置完整人设、独立性格、语言风格、简量人设、标签、时区和头像。</div>
+        </div>
         <details className="rounded-xl border border-black/10 px-3 py-2">
           <summary className="cursor-pointer text-xs font-semibold">执行助理工具授权（{tools.filter(tool => policy?.permissions[tool.key]?.chatEnabled).length}/{tools.length}）</summary>
           <div className="mt-3 flex max-h-72 flex-col gap-2 overflow-auto">
