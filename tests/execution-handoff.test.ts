@@ -45,6 +45,18 @@ test("gateway and MCP both implement task create/list/claim/finish/cancel withou
   assert.doesNotMatch(`${gateway}\n${mcp}`, /create table|alter table/i);
 });
 
+test("official custom GPT Action reuses the MCP permission and audit implementation", () => {
+  const mcp = readFileSync(resolve(root, "supabase/functions/role-memory-mcp/index.ts"), "utf8");
+  assert.match(mcp, /openapi:\s*"3\.1\.0"/);
+  assert.match(mcp, /\/openapi\.json/);
+  assert.match(mcp, /`\/actions\/\$\{tool\.name\}`/);
+  assert.match(mcp, /scheme:\s*"bearer"/);
+  assert.match(mcp, /method:\s*"tools\/call"/);
+  assert.match(mcp, /id:\s*ACTION_REQUEST_ID/);
+  assert.match(mcp, /USER_VIEW_READ_TOOLS\.has\(name\)/);
+  assert.match(mcp, /await audit\(/);
+});
+
 test("execution layer hard-denies memory and permission expansion", () => {
   const executor = readFileSync(resolve(root, "lib/tool-executor.ts"), "utf8");
   const policy = readFileSync(resolve(root, "lib/user-view-read.ts"), "utf8");

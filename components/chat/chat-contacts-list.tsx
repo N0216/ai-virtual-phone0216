@@ -27,7 +27,7 @@ import {
     subscribeMascotSettings,
     updateMascotSettings,
 } from "@/lib/mascot-settings";
-import { loadDeepSeekExecutionAssistantConfig } from "@/lib/deepseek-execution-assistant";
+import { DEEPSEEK_ASSISTANT_UPDATED_EVENT, loadDeepSeekExecutionAssistantConfig, saveDeepSeekExecutionAssistantConfig } from "@/lib/deepseek-execution-assistant";
 import { DeepSeekAssistantAvatar } from "./deepseek-assistant-avatar";
 
 type ChatContactsListProps = {
@@ -53,12 +53,14 @@ export function ChatContactsList({ onCloseApp, onSelectSession, onSelectMascot, 
     const [isAddFriendOpen, setIsAddFriendOpen] = useState(false);
     const [addQuery, setAddQuery] = useState("");
     const [addResult, setAddResult] = useState<Character | null | undefined>(undefined);
+    const [assistantAddResult, setAssistantAddResult] = useState(false);
     const [isSendingAdd, setIsSendingAdd] = useState(false);
     const [greetingText, setGreetingText] = useState("");
     // 添加页是否由名片打开：返回时应回到原聊天室而非联系人列表
     const addFromCardRef = useRef(false);
     const mascotSettings = useSyncExternalStore(subscribeMascotSettings, getMascotSettingsSnapshot, getMascotSettingsSnapshot);
     const [mascotAvatarUrl, setMascotAvatarUrl] = useState(mascotSettings.avatarImage || DEFAULT_MASCOT_AVATAR);
+    const [assistantConfig, setAssistantConfig] = useState(loadDeepSeekExecutionAssistantConfig);
 
     const identity = useMemo(() => resolveUserIdentity(), []);
     const chars = useMemo(() => loadCharacters(), []);
@@ -73,6 +75,12 @@ export function ChatContactsList({ onCloseApp, onSelectSession, onSelectMascot, 
         });
         return () => { cancelled = true; };
     }, [mascotSettings.avatarImage]);
+
+    useEffect(() => {
+        const refreshAssistant = () => setAssistantConfig(loadDeepSeekExecutionAssistantConfig());
+        window.addEventListener(DEEPSEEK_ASSISTANT_UPDATED_EVENT, refreshAssistant);
+        return () => window.removeEventListener(DEEPSEEK_ASSISTANT_UPDATED_EVENT, refreshAssistant);
+    }, []);
 
     // 名片点击「添加到通讯录」：phone-chat-app 切到本 tab 后由 prop 传入待添加角色，
     // 打开添加页并预载资料（本组件仅在 tab 激活时挂载，不能直接监听事件）
@@ -261,12 +269,12 @@ export function ChatContactsList({ onCloseApp, onSelectSession, onSelectMascot, 
                         </div>
                     </div>
                 )}
-                {loadDeepSeekExecutionAssistantConfig().chatEnabled !== false && (
+                {assistantConfig.contactAdded === true && (
                     <div className="mb-3">
                         <div className="minimal-list-item" onClick={onSelectDeepSeek}>
                             <DeepSeekAssistantAvatar className="minimal-avatar-wrapper bg-[#2f6bff] text-white grid place-items-center font-bold overflow-hidden" />
                             <div className="flex-1 overflow-hidden h-[48px] flex flex-col justify-center gap-1">
-                                <div className="ts-16 font-medium text-[var(--c-text-title)] truncate">{loadDeepSeekExecutionAssistantConfig().nickname || "DeepSeek助手"}</div>
+                                <div className="ts-16 font-medium text-[var(--c-text-title)] truncate">{assistantConfig.nickname || "执行助理"}</div>
                                 <div className="ts-13 text-[var(--c-text)] opacity-80 truncate font-normal">低权限执行助理</div>
                             </div>
                         </div>
@@ -453,7 +461,7 @@ export function ChatContactsList({ onCloseApp, onSelectSession, onSelectMascot, 
                                         autoFocus
                                         placeholder="微信号/手机号"
                                         value={addQuery}
-                                        onChange={(e) => { setAddQuery(e.target.value); setAddResult(undefined); }}
+                                        onChange={(e) => { setAddQuery(e.target.value); setAddResult(undefined); setAssistantAddResult(false); }}
                                         className="ui-input ui-input-inline"
                                     />
                                     {addQuery && (
@@ -466,7 +474,11 @@ export function ChatContactsList({ onCloseApp, onSelectSession, onSelectMascot, 
                                     <button
                                         className="menu-item"
                                         onClick={() => {
-                                            const found = chars.find(c => c.wechatID === addQuery.trim() || c.id === addQuery.trim());
+                                            const query = addQuery.trim();
+                                            const isAssistant = assistantConfig.chatEnabled === true && !assistantConfig.contactAdded && query === (assistantConfig.wechatId || "execution_assistant");
+                                            setAssistantAddResult(isAssistant);
+                                            if (isAssistant) { setAddResult(undefined); return; }
+                                            const found = chars.find(c => c.wechatID === query || c.id === query);
                                             setAddResult(found || null);
                                         }}
                                     >
@@ -510,6 +522,28 @@ export function ChatContactsList({ onCloseApp, onSelectSession, onSelectMascot, 
                     )}
                     {addResult === null && (
                         <div className="ui-empty"><span className="menu-desc">该用户不存在</span></div>
+                    )}
+                    {assistantAddResult && (
+                        <div className="page-menu">
+                            <div className="menu-group">
+                                <div className="menu-item !items-start">
+                                    <DeepSeekAssistantAvatar className="add-friend-avatar bg-[#2f6bff] text-white grid place-items-center font-bold overflow-hidden" />
+                                    <div className="menu-label-group">
+                                        <div className="ts-18 font-bold text-[var(--c-text-title)] mb-1">{assistantConfig.nickname || "执行助理"}</div>
+                                        <div className="menu-desc">微信号: {assistantConfig.wechatId || "execution_assistant"}</div>
+                                        <div className="menu-desc">个性签名: 低权限执行助理；模型、性格和外观均可自定义</div>
+                                    </div>
+                                </div>
+                            </div>
+                            <button onClick={() => {
+                                const next = { ...assistantConfig, contactAdded: true };
+                                saveDeepSeekExecutionAssistantConfig(next);
+                                setAssistantConfig(next);
+                                setAssistantAddResult(false);
+                                setIsAddFriendOpen(false);
+                                onSelectDeepSeek();
+                            }} className="ui-btn ui-btn-success w-full">添加到通讯录</button>
+                        </div>
                     )}
                     {addResult && !isSendingAdd && (
                         <div className="page-menu">

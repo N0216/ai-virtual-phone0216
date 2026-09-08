@@ -28,7 +28,7 @@ import {
     subscribeMascotSettings,
     updateMascotSettings,
 } from "@/lib/mascot-settings";
-import { DEEPSEEK_ASSISTANT_UPDATED_EVENT, loadDeepSeekExecutionAssistantConfig } from "@/lib/deepseek-execution-assistant";
+import { DEEPSEEK_ASSISTANT_UPDATED_EVENT, loadDeepSeekExecutionAssistantConfig, saveDeepSeekExecutionAssistantConfig } from "@/lib/deepseek-execution-assistant";
 import { kvGet } from "@/lib/kv-db";
 
 /** Fallback: find last non-empty, non-system message preview when session preview is empty */
@@ -70,6 +70,7 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
     const [isSearchModalOpen, setIsSearchModalOpen] = useState(false);
     const [searchQuery, setSearchQuery] = useState("");
     const [searchResult, setSearchResult] = useState<Character | null | undefined>(undefined);
+    const [assistantSearchResult, setAssistantSearchResult] = useState(false);
     // undefined: not searched yet, null: searched and not found, Character: found
 
     const [isSendingRequest, setIsSendingRequest] = useState(false);
@@ -238,7 +239,7 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
                             const showMascot = mascotSettings.chatEnabled
                                 && listTab !== "group"
                                 && (!keyword || (mascotSettings.nickname || "AI助手").toLowerCase().includes(keyword));
-                            const showDeepSeek = deepSeekConfig.chatEnabled !== false && listTab !== "group"
+                            const showDeepSeek = deepSeekConfig.contactAdded === true && listTab !== "group"
                                 && (!keyword || (deepSeekConfig.nickname || "DeepSeek助手").toLowerCase().includes(keyword));
                             const regularItems = [...sessions]
                             .filter(s => {
@@ -283,7 +284,7 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
                                     )}
                                     {showDeepSeek && (
                                         <MascotSessionItem
-                                            name={deepSeekConfig.nickname || "DeepSeek助手"}
+                                            name={deepSeekConfig.nickname || "执行助理"}
                                             avatarUrl={deepSeekAvatarUrl || "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%232f6bff'/%3E%3Ctext x='32' y='41' text-anchor='middle' font-family='Arial' font-size='25' font-weight='700' fill='white'%3EDS%3C/text%3E%3C/svg%3E"}
                                             preview={(() => { try { const rows=JSON.parse(kvGet("ai_phone_deepseek_assistant_chat_v1")||"[]") as Array<{text?:string}>; return rows.at(-1)?.text || "低权限执行助理已就位"; } catch { return "低权限执行助理已就位"; } })()}
                                             isThinking={false}
@@ -315,6 +316,7 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
                                         onChange={(e) => {
                                             setSearchQuery(e.target.value);
                                             setSearchResult(undefined);
+                                            setAssistantSearchResult(false);
                                         }}
                                         className="ui-input ui-input-inline"
                                     />
@@ -329,8 +331,12 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
                                     <button
                                         className="menu-item"
                                         onClick={() => {
+                                            const query = searchQuery.trim();
+                                            const isAssistant = deepSeekConfig.chatEnabled === true && !deepSeekConfig.contactAdded && query === (deepSeekConfig.wechatId || "execution_assistant");
+                                            setAssistantSearchResult(isAssistant);
+                                            if (isAssistant) { setSearchResult(undefined); return; }
                                             const chars = loadCharacters();
-                                            const found = chars.find(c => c.wechatID === searchQuery.trim() || c.id === searchQuery.trim());
+                                            const found = chars.find(c => c.wechatID === query || c.id === query);
                                             setSearchResult(found || null);
                                         }}
                                     >
@@ -407,6 +413,31 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
                     {searchResult === null && (
                         <div className="ui-empty">
                             <span className="menu-desc">该用户不存在</span>
+                        </div>
+                    )}
+
+                    {assistantSearchResult && (
+                        <div className="page-menu">
+                            <div className="menu-group">
+                                <div className="menu-item !items-start">
+                                    <div className="add-friend-avatar overflow-hidden bg-[#2f6bff] text-white grid place-items-center font-bold">
+                                        {deepSeekAvatarUrl ? <img src={deepSeekAvatarUrl} className="w-full h-full object-cover" alt="" /> : <span>AI</span>}
+                                    </div>
+                                    <div className="menu-label-group">
+                                        <div className="ts-18 font-bold text-[var(--c-text-title)] mb-1">{deepSeekConfig.nickname || "执行助理"}</div>
+                                        <div className="menu-desc">微信号: {deepSeekConfig.wechatId || "execution_assistant"}</div>
+                                        <div className="menu-desc">低权限执行助理；拥有角色聊天能力和额外执行能力</div>
+                                    </div>
+                                </div>
+                            </div>
+                            <button onClick={() => {
+                                const next = { ...deepSeekConfig, contactAdded: true };
+                                saveDeepSeekExecutionAssistantConfig(next);
+                                setDeepSeekConfig(next);
+                                setAssistantSearchResult(false);
+                                setIsSearchModalOpen(false);
+                                onSelectDeepSeek();
+                            }} className="ui-btn ui-btn-success w-full">添加到通讯录</button>
                         </div>
                     )}
 

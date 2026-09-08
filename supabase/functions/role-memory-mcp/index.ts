@@ -2,6 +2,7 @@
 // 部署在用户自己的 Supabase 项目中；仅接受个人云生成的 Bearer token。
 
 const OWNER_ID = "owner";
+const ACTION_REQUEST_ID = "__official_gpt_action__";
 const EXECUTION_TASK_MARKER = "ai_phone_execution_task_v1";
 const EXECUTION_TASK_ID_PATTERN = /^exec_task_[a-f0-9-]{20,80}$/i;
 const EXECUTION_TASK_STATUSES = new Set(["pending", "running", "succeeded", "failed", "cancelled"]);
@@ -148,10 +149,18 @@ function executionTaskContext(task: ExecutionTask): unknown[] {
 }
 
 function rpcResult(id: unknown, result: unknown): Response {
+  if (id === ACTION_REQUEST_ID) {
+    const toolResponse = result && typeof result === "object" ? result as Record<string, unknown> : {};
+    return responseJson(
+      toolResponse.structuredContent ?? result,
+      toolResponse.isError === true ? 400 : 200,
+    );
+  }
   return responseJson({ jsonrpc: "2.0", id, result });
 }
 
 function rpcError(id: unknown, code: number, message: string, status = 200): Response {
+  if (id === ACTION_REQUEST_ID) return responseJson({ error: message, code }, Math.max(400, status));
   return responseJson({ jsonrpc: "2.0", id, error: { code, message } }, status);
 }
 
@@ -319,8 +328,60 @@ const TOOLS = [
   },
 ];
 
+function actionOpenApiDocument(requestUrl: URL) {
+  const schemaSuffix = "/openapi.json";
+  const baseUrl = requestUrl.href.endsWith(schemaSuffix)
+    ? requestUrl.href.slice(0, -schemaSuffix.length)
+    : requestUrl.href.replace(/\/$/, "");
+  const paths = Object.fromEntries(TOOLS.map(tool => [
+    `/actions/${tool.name}`,
+    {
+      post: {
+        operationId: tool.name,
+        summary: tool.description,
+        description: tool.description,
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: tool.inputSchema } },
+        },
+        responses: {
+          "200": {
+            description: "操作成功",
+            content: { "application/json": { schema: { type: "object", additionalProperties: true } } },
+          },
+          "400": {
+            description: "请求被权限策略拒绝或参数无效",
+            content: { "application/json": { schema: { type: "object", additionalProperties: true } } },
+          },
+          "401": { description: "访问令牌无效" },
+        },
+      },
+    },
+  ]));
+  return {
+    openapi: "3.1.0",
+    info: {
+      title: "小手机 Eiren 受控访问",
+      version: "1.0.0",
+      description: "供 ChatGPT 官方自定义 GPT 使用。底层继续执行小手机的细粒度权限、角色手机隔离、凭据脱敏和查询审计。",
+    },
+    servers: [{ url: baseUrl }],
+    components: {
+      securitySchemes: {
+        bearerAuth: { type: "http", scheme: "bearer", bearerFormat: "AI Phone personal access token" },
+      },
+    },
+    security: [{ bearerAuth: [] }],
+    paths,
+  };
+}
+
 Deno.serve(async (request: Request) => {
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS_HEADERS });
+  const requestUrl = new URL(request.url);
+  if (request.method === "GET" && requestUrl.pathname.endsWith("/openapi.json")) {
+    return responseJson(actionOpenApiDocument(requestUrl));
+  }
   if (request.method === "GET") return responseJson({ ok: true, service: "role-memory-mcp", transport: "streamable-http" });
   if (request.method !== "POST") return responseJson({ error: "Method not allowed" }, 405);
 
@@ -370,7 +431,15 @@ Deno.serve(async (request: Request) => {
     return responseJson({ error: "Unauthorized" }, 401);
   }
 
-  const body = await request.json().catch(() => null) as { jsonrpc?: unknown; id?: unknown; method?: unknown; params?: unknown } | null;
+  const actionMarker = "/actions/";
+  const actionOffset = requestUrl.pathname.lastIndexOf(actionMarker);
+  const actionName = actionOffset >= 0
+    ? cleanText(decodeURIComponent(requestUrl.pathname.slice(actionOffset + actionMarker.length).split("/")[0] || ""), 80)
+    : "";
+  const requestBody = await request.json().catch(() => null) as Record<string, unknown> | null;
+  const body = actionName
+    ? { jsonrpc: "2.0", id: ACTION_REQUEST_ID, method: "tools/call", params: { name: actionName, arguments: requestBody || {} } }
+    : requestBody as { jsonrpc?: unknown; id?: unknown; method?: unknown; params?: unknown } | null;
   if (!body || body.jsonrpc !== "2.0") return rpcError(body?.id ?? null, -32600, "Invalid Request", 400);
   if (body.method === "notifications/initialized") return new Response(null, { status: 202, headers: CORS_HEADERS });
   if (body.method === "initialize") return rpcResult(body.id, {

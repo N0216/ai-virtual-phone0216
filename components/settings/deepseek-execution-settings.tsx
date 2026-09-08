@@ -20,7 +20,7 @@ import { listToolPermissionEntries } from "@/lib/tool-storage";
 export function DeepSeekExecutionSettings() {
   const [config, setConfig] = useState<DeepSeekExecutionAssistantConfig>(() => loadDeepSeekExecutionAssistantConfig());
   const [revision, setRevision] = useState(0);
-  const apis = useMemo(() => loadApiConfigs().filter(api => api.provider.toLowerCase() === "deepseek"), []);
+  const apis = useMemo(() => loadApiConfigs(), []);
   const tools = useMemo(() => listToolPermissionEntries("chat").filter(tool => !isForbiddenDeepSeekToolName(tool.name)), [revision]);
   const policy = loadCharacterToolPolicy(DEEPSEEK_EXECUTOR_ID);
 
@@ -56,7 +56,7 @@ export function DeepSeekExecutionSettings() {
       <div className="ui-group-card flex flex-col gap-3">
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
-            <div className="menu-label">DeepSeek 执行助理</div>
+            <div className="menu-label">执行助理</div>
             <div className="menu-desc !mt-1">只领取官软 Eiren 创建的任务；任务范围与下方本地授权取交集。</div>
           </div>
           <Toggle checked={config.enabled} disabled={!config.apiConfigId} onChange={enabled => saveConfig({ enabled })} />
@@ -66,13 +66,17 @@ export function DeepSeekExecutionSettings() {
           onChange={event => saveConfig({ apiConfigId: event.target.value })}
           disabled={!apis.length}
         >
-          <option value="">{apis.length ? "选择 DeepSeek API" : "请先添加 DeepSeek API"}</option>
-          {apis.map(api => <option key={api.id} value={api.id}>{api.name || "DeepSeek"}</option>)}
+          <option value="">{apis.length ? "选择模型 API" : "请先添加模型 API"}</option>
+          {apis.map(api => <option key={api.id} value={api.id}>{api.name || api.provider} · {api.provider}</option>)}
         </Select>
         <div className="flex items-center justify-between gap-3">
-          <div><div className="menu-label">显示在聊天列表</div><div className="menu-desc !mt-1">固定身份为 DeepSeek助手，可像执行助理一样直接聊天</div></div>
+          <div><div className="menu-label">允许添加执行助理</div><div className="menu-desc !mt-1">开启后可通过微信号搜索角色卡；不会自动加入联系人或消息列表</div></div>
           <Toggle checked={config.chatEnabled !== false} onChange={chatEnabled => saveConfig({ chatEnabled })} />
         </div>
+        <label className="flex flex-col gap-1">
+          <span className="menu-label">助理微信号</span>
+          <input className="ui-input" value={config.wechatId || ""} onChange={event => saveConfig({ wechatId: event.target.value.trim() })} placeholder="execution_assistant" />
+        </label>
         <label className="flex flex-col gap-1">
           <span className="menu-label">性格与工作风格</span>
           <textarea className="ui-textarea min-h-24" value={config.personaPrompt || ""} onChange={event => saveConfig({ personaPrompt: event.target.value })} placeholder="例如：沉稳、简洁、主动汇报风险……" />

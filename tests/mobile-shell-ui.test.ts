@@ -59,17 +59,40 @@ test("built-in assistant preserves real voice and file attachments", () => {
   assert.match(engine, /attachments\?: Array/);
 });
 
-test("DeepSeek chat exposes scoped handoff status and tool traces", () => {
+test("execution assistant uses the normal chat shell and exposes scoped handoff traces", () => {
   const room = read("components/chat/deepseek-assistant-chat-room.tsx");
   assert.match(room, /runNextDeepSeekExecutionTask/);
   assert.match(room, /permission_scope/);
   assert.match(room, /task\.tool_trace/);
-  assert.match(room, /Eiren → DeepSeek 任务区/);
+  assert.match(room, /Eiren → 执行助理任务区/);
+  assert.match(room, /page-header-safe-area/);
+  assert.match(room, /page-header-content/);
+  assert.match(room, /aria-label="语音输入"[\s\S]*<svg/);
+  assert.match(room, /aria-label="表情"[\s\S]*<svg/);
+  assert.match(room, /aria-label="更多功能"[\s\S]*<svg/);
   assert.match(room, /性格与工作风格/);
   assert.match(room, /chatBackgroundImage/);
   assert.match(room, /kind: "image" \| "file" \| "audio"/);
   assert.match(room, /语音通话/);
   assert.match(room, /视频通话/);
+});
+
+test("execution assistant is provider-neutral and must be explicitly added by WeChat id", () => {
+  const runtime = read("lib/deepseek-execution-assistant.ts");
+  const settings = read("components/settings/deepseek-execution-settings.tsx");
+  const contacts = read("components/chat/chat-contacts-list.tsx");
+  const messages = read("components/chat/chat-message-list.tsx");
+  assert.doesNotMatch(runtime, /provider\.toLowerCase\(\) === "deepseek"/);
+  assert.doesNotMatch(settings, /filter\(api => api\.provider\.toLowerCase\(\) === "deepseek"\)/);
+  assert.match(settings, /允许添加执行助理/);
+  assert.match(settings, /助理微信号/);
+  assert.match(runtime, /contactAdded\?: boolean/);
+  assert.match(contacts, /query === \(assistantConfig\.wechatId/);
+  assert.match(messages, /query === \(deepSeekConfig\.wechatId/);
+  assert.match(contacts, /contactAdded === true/);
+  assert.match(messages, /contactAdded === true/);
+  assert.match(contacts, /assistantConfig\.chatEnabled === true[\s\S]*query ===/);
+  assert.match(messages, /deepSeekConfig\.chatEnabled === true[\s\S]*query ===/);
 });
 
 test("inner monologue appearance is mutually exclusive and offline composer stays in one row", () => {

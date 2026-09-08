@@ -26,7 +26,7 @@ export type PersonalPushCloudState = {
   healthError?: string;
 };
 
-export type RoleMemoryAccess = { mcpUrl: string; token: string };
+export type RoleMemoryAccess = { mcpUrl: string; actionOpenApiUrl: string; token: string };
 export type RoleQueryLog = {
   id: string;
   operation_label: string;
@@ -144,7 +144,11 @@ export async function getRoleMemoryAccess(): Promise<RoleMemoryAccess> {
   if (!response.ok || !data?.ok || !data.mcpUrl || !data.token) {
     throw new Error(data?.error || `角色记忆连接返回 HTTP ${response.status}`);
   }
-  return { mcpUrl: data.mcpUrl, token: data.token };
+  return {
+    mcpUrl: data.mcpUrl,
+    actionOpenApiUrl: `${data.mcpUrl.replace(/\/$/, "")}/openapi.json`,
+    token: data.token,
+  };
 }
 
 export async function getRoleQueryLogs(): Promise<RoleQueryLog[]> {

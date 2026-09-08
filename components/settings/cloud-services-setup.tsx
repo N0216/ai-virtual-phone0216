@@ -432,12 +432,19 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
                     <div className="modal-dialog" role="dialog" aria-modal="true" aria-label="官 G 记忆连接" onClick={(e) => e.stopPropagation()}>
                         <div className="modal-body flex flex-col gap-3">
                             <h3 className="modal-title">官 G 个人端连接</h3>
-                            <p className="menu-desc !mt-0">官 G 可按角色查询聊天、离线聊天、朋友圈、日记、自定义应用和角色虚拟手机。重要记忆盒子仍单独保存。令牌不要发进聊天。</p>
+                            <p className="menu-desc !mt-0">官 G 可在现有授权内查询个人端资料并创建执行交接任务；角色手机整体不可读。令牌不要发进聊天。</p>
                             <label className="flex flex-col gap-1">
                                 <span className="menu-desc !mt-0">MCP 地址</span>
                                 <div className="flex items-center gap-2">
                                     <Input readOnly value={roleMemoryAccess.mcpUrl} className="min-w-0 flex-1" />
                                     <button type="button" className="ui-btn" onClick={() => void copyText(roleMemoryAccess.mcpUrl, "MCP 地址")}><Copy size={16} /></button>
+                                </div>
+                            </label>
+                            <label className="flex flex-col gap-1">
+                                <span className="menu-desc !mt-0">官方自定义 GPT · Action 架构地址</span>
+                                <div className="flex items-center gap-2">
+                                    <Input readOnly value={roleMemoryAccess.actionOpenApiUrl} className="min-w-0 flex-1" />
+                                    <button type="button" className="ui-btn" onClick={() => void copyText(roleMemoryAccess.actionOpenApiUrl, "Action 架构地址")}><Copy size={16} /></button>
                                 </div>
                             </label>
                             <div className="flex flex-col gap-2 rounded-[14px] bg-black/[0.03] p-3">

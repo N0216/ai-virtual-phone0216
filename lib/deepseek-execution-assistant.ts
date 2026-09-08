@@ -17,10 +17,14 @@ export type DeepSeekExecutionAssistantConfig = {
   apiConfigId: string;
   executorId: string;
   chatEnabled?: boolean;
+  contactAdded?: boolean;
+  wechatId?: string;
+  isPinned?: boolean;
   personaPrompt?: string;
   nickname?: string;
   avatarImage?: string;
   chatBackgroundImage?: string;
+  callBackgroundImage?: string;
 };
 
 export const DEEPSEEK_ASSISTANT_UPDATED_EVENT = "ai-phone-deepseek-assistant-updated";
@@ -51,14 +55,18 @@ export function loadDeepSeekExecutionAssistantConfig(): DeepSeekExecutionAssista
       enabled: parsed.enabled === true,
       apiConfigId: String(parsed.apiConfigId || ""),
       executorId: String(parsed.executorId || DEEPSEEK_EXECUTOR_ID),
-      chatEnabled: parsed.chatEnabled !== false,
+      chatEnabled: parsed.chatEnabled === true,
+      contactAdded: parsed.contactAdded === true,
+      wechatId: String(parsed.wechatId || "execution_assistant"),
+      isPinned: parsed.isPinned === true,
       personaPrompt: String(parsed.personaPrompt || "沉稳、利落、诚实，先确认目标再行动；像现实中的执行助理一样汇报进度、结果和风险。"),
       nickname: String(parsed.nickname || "DeepSeek助手"),
       avatarImage: String(parsed.avatarImage || ""),
       chatBackgroundImage: String(parsed.chatBackgroundImage || ""),
+      callBackgroundImage: String(parsed.callBackgroundImage || ""),
     };
   } catch {
-    return { enabled: false, apiConfigId: "", executorId: DEEPSEEK_EXECUTOR_ID, chatEnabled: true, personaPrompt: "沉稳、利落、诚实，先确认目标再行动；像现实中的执行助理一样汇报进度、结果和风险。" };
+    return { enabled: false, apiConfigId: "", executorId: DEEPSEEK_EXECUTOR_ID, chatEnabled: false, contactAdded: false, wechatId: "execution_assistant", personaPrompt: "沉稳、利落、诚实，先确认目标再行动；像现实中的执行助理一样汇报进度、结果和风险。" };
   }
 }
 
@@ -79,17 +87,17 @@ export type DeepSeekExecutionRunnerDeps = {
 };
 
 function defaultDeps(config: DeepSeekExecutionAssistantConfig): DeepSeekExecutionRunnerDeps {
-  const api = loadApiConfigs().find(item => item.id === config.apiConfigId && item.provider.toLowerCase() === "deepseek");
-  if (!api) throw new Error("DeepSeek 执行助理未绑定有效的 DeepSeek API 配置。");
+  const api = loadApiConfigs().find(item => item.id === config.apiConfigId);
+  if (!api) throw new Error("执行助理未绑定有效的模型 API 配置。");
   return {
     list: () => listExecutionTasks("pending"),
     claim: claimExecutionTask,
     refresh: getExecutionTask,
     finish: finishExecutionTask,
-    model: messages => simpleLLMCall(api, messages, { temperature: 0.1, max_tokens: 1600, usageCategory: "tool", usageLabel: "DeepSeek 执行助理" }),
+    model: messages => simpleLLMCall(api, messages, { temperature: 0.1, max_tokens: 1600, usageCategory: "tool", usageLabel: "执行助理" }),
     execute: (calls, task) => executeToolCalls(calls, {
       appId: "chat", sourceEngine: "execution_assistant", toolUsage: "chat",
-      characterId: config.executorId, characterDisplayName: "DeepSeek 执行助理",
+      characterId: config.executorId, characterDisplayName: config.nickname || "执行助理",
       actorType: "deepseek", taskId: task.task_id, allowedToolNames: task.permission_scope,
     }),
     now: () => new Date().toISOString(),
@@ -130,7 +138,7 @@ export async function runNextDeepSeekExecutionTask(
     for (let round = 0; round < 6; round += 1) {
       if ((await deps.refresh(task.task_id)).status !== "running") throw new Error("任务已被 Eiren 取消");
       const response = await deps.model(messages);
-      if (!response.content) throw new Error(response.error || "DeepSeek 没有返回结果");
+      if (!response.content) throw new Error(response.error || "执行助理模型没有返回结果");
       const parsed = parseToolCalls(response.content);
       if (parsed.toolCalls.length === 0) {
         if (trace.length > 0 && !trace.some(item => item.success)) {

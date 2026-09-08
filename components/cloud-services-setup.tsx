@@ -399,12 +399,19 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
                     <div className="modal-dialog" role="dialog" aria-modal="true" aria-label="官 G 记忆连接" onClick={(e) => e.stopPropagation()}>
                         <div className="modal-body flex flex-col gap-3">
                             <h3 className="modal-title">官 G 记忆连接</h3>
-                            <p className="menu-desc !mt-0">把地址和令牌填到官 G 的 MCP 设置。令牌只在这里使用，不要发进聊天。</p>
+                            <p className="menu-desc !mt-0">MCP 地址用于 ChatGPT 的 MCP/自定义应用；Action 架构地址用于官方自定义 GPT。两种方式共用同一套权限与审计。令牌不要发进聊天。</p>
                             <label className="flex flex-col gap-1">
                                 <span className="menu-desc !mt-0">MCP 地址</span>
                                 <div className="flex items-center gap-2">
                                     <Input readOnly value={roleMemoryAccess.mcpUrl} className="min-w-0 flex-1" />
                                     <button type="button" className="ui-btn" onClick={() => void copyText(roleMemoryAccess.mcpUrl, "MCP 地址")}><Copy size={16} /></button>
+                                </div>
+                            </label>
+                            <label className="flex flex-col gap-1">
+                                <span className="menu-desc !mt-0">官方自定义 GPT · Action 架构地址</span>
+                                <div className="flex items-center gap-2">
+                                    <Input readOnly value={roleMemoryAccess.actionOpenApiUrl} className="min-w-0 flex-1" />
+                                    <button type="button" className="ui-btn" onClick={() => void copyText(roleMemoryAccess.actionOpenApiUrl, "Action 架构地址")}><Copy size={16} /></button>
                                 </div>
                             </label>
                             <label className="flex flex-col gap-1">
