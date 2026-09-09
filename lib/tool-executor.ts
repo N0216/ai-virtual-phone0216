@@ -95,6 +95,7 @@ import {
     isRolePhoneLocalDataPath,
     isRolePhoneReference,
     isRolePhoneUserViewReadCallDenied,
+    requiresControlledInteractionRead,
     resolveUserViewReadPermission,
     sanitizeUserViewReadResult,
 } from "./user-view-read";
@@ -1444,8 +1445,11 @@ async function executeLocalDataTool(call: ToolCall, context?: ToolExecutionConte
     const normalizedPath = `/${requestedPath.replace(/^\/+/, "")}`.replace(/\/+$/, "") || "/";
     const ownerViewRead = isAuthorizedEirenUserViewRead(call, context);
     const scansAllModules = call.name === "搜索资料记录" && normalizedPath === "/";
-    const targetsPrivateChat = normalizedPath === "/chat" || normalizedPath.startsWith("/chat/");
-    if (scansAllModules || targetsPrivateChat) {
+    if (requiresControlledInteractionRead({
+        sourceEngine: context?.sourceEngine,
+        normalizedPath,
+        scansAllModules,
+    })) {
         return {
             name: call.name,
             success: false,

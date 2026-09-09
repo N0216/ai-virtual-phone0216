@@ -289,6 +289,7 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
                                             preview={(() => { try { const rows=JSON.parse(kvGet("ai_phone_deepseek_assistant_chat_v1")||"[]") as Array<{text?:string}>; return rows.at(-1)?.text || "低权限执行助理已就位"; } catch { return "低权限执行助理已就位"; } })()}
                                             isThinking={false}
                                             onSelect={onSelectDeepSeek}
+                                            avatarFit="cover"
                                         />
                                     )}
                                     {regularItems}
@@ -625,17 +626,19 @@ function MascotSessionItem({
     preview,
     isThinking,
     onSelect,
+    avatarFit = "contain",
 }: {
     name: string;
     avatarUrl: string;
     preview: string;
     isThinking: boolean;
     onSelect: () => void;
+    avatarFit?: "contain" | "cover";
 }) {
     return (
         <div className="minimal-list-item" onClick={onSelect}>
             <div className="minimal-avatar-wrapper bg-white">
-                <img src={avatarUrl} className="w-full h-full object-contain pointer-events-none rounded-full p-[2px]" alt="" />
+                <img src={avatarUrl} className={`w-full h-full pointer-events-none rounded-full ${avatarFit === "cover" ? "object-cover" : "object-contain p-[2px]"}`} alt="" />
                 <span className="minimal-online-dot" />
             </div>
             <div className="flex-1 overflow-hidden h-[48px] flex flex-col justify-center gap-1">

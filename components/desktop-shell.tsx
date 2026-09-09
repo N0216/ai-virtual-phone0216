@@ -144,6 +144,15 @@ import { startWeixinCloudRealtimeSync } from "@/lib/weixin-cloud-sync";
 import { sendBrowserNotification } from "@/lib/browser-notification";
 import type { ChatSharePayload } from "@/lib/chat-share";
 import { completePendingMcpOAuthCallback } from "@/lib/tool-executor";
+import {
+  EXECUTION_ASSISTANT_INSPECTION_END_EVENT,
+  EXECUTION_ASSISTANT_INSPECTION_START_EVENT,
+  EXECUTION_ASSISTANT_INSPECTION_STEP_EVENT,
+  type ExecutionAssistantInspectionEnd,
+  type ExecutionAssistantInspectionStart,
+  type ExecutionAssistantInspectionStep,
+} from "@/lib/execution-assistant-phone-inspection";
+import { finishDeviceOperation, startDeviceOperation } from "@/lib/device-operation-log";
 import { LayoutGrid, LoaderCircle, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
 
 const EMOJI_FONTS = '"Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", "Twemoji Mozilla"';
@@ -209,6 +218,30 @@ const TEXT = {
 };
 
 type DesktopLayout = DesktopIconLayout;
+
+type ExecutionInspectionSnapshot = {
+  taskId: string;
+  activeApp: DesktopIconId | null;
+  currentPageIndex: number;
+  openFolderId: string | null;
+  folderPageIndex: number;
+  editMode: boolean;
+  scrollOffsets: Array<{ top: number; left: number }>;
+};
+
+function capturePhoneScrollOffsets(root: HTMLElement | null): Array<{ top: number; left: number }> {
+  if (!root) return [];
+  return [root, ...Array.from(root.querySelectorAll<HTMLElement>("*"))]
+    .filter(element => element.scrollHeight > element.clientHeight || element.scrollWidth > element.clientWidth)
+    .map(element => ({ top: element.scrollTop, left: element.scrollLeft }));
+}
+
+function restorePhoneScrollOffsets(root: HTMLElement | null, offsets: Array<{ top: number; left: number }>): void {
+  if (!root || offsets.length === 0) return;
+  const scrollables = [root, ...Array.from(root.querySelectorAll<HTMLElement>("*"))]
+    .filter(element => element.scrollHeight > element.clientHeight || element.scrollWidth > element.clientWidth);
+  offsets.forEach((offset, index) => scrollables[index]?.scrollTo({ top: offset.top, left: offset.left, behavior: "auto" }));
+}
 
 type DesktopShellProps = {
   initialThemeProfile?: ThemeProfile | null;
@@ -1061,6 +1094,14 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   const [glassPaintPass, setGlassPaintPass] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
   const [activeApp, setActiveApp] = useState<DesktopIconId | null>(null);
+  const [executionInspection, setExecutionInspection] = useState<{
+    taskId: string;
+    assistantName: string;
+    label: string;
+    restoring?: boolean;
+  } | null>(null);
+  const executionInspectionSnapshotRef = useRef<ExecutionInspectionSnapshot | null>(null);
+  const executionInspectionClearTimerRef = useRef<number | null>(null);
   useEdgeSwipeBack(() => setActiveApp(null), activeApp !== null, { priority: -100 });
   const [customApps, setCustomApps] = useState<InstalledCustomApp[]>([]);
   // 自定义 APP 桌面图标样式偏好（global = 忽略上传图标走全局效果）
@@ -1335,6 +1376,12 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   // Refs to latest state for use in stable callbacks
   const currentPageIndexRef = useRef(currentPageIndex);
   currentPageIndexRef.current = currentPageIndex;
+  const openFolderIdRef = useRef(openFolderId);
+  openFolderIdRef.current = openFolderId;
+  const folderPageIndexRef = useRef(folderPageIndex);
+  folderPageIndexRef.current = folderPageIndex;
+  const editModeRef = useRef(editMode);
+  editModeRef.current = editMode;
   const widgetsRef = useRef(widgets);
   widgetsRef.current = widgets;
   const layoutRef = useRef(layout);
@@ -2375,6 +2422,129 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
   const [activeChatSession, setActiveChatSession] = useState<ChatSession | null>(null);
   const [customAppLaunchContext, setCustomAppLaunchContext] = useState<CustomAppLaunchState | null>(null);
   const [appMarketLaunchContext, setAppMarketLaunchContext] = useState<Record<string, unknown> | null>(null);
+
+  useEffect(() => {
+    const recordRestore = async (
+      taskId: string,
+      status: "succeeded" | "failed",
+      error?: unknown,
+    ) => {
+      try {
+        const operation = await startDeviceOperation({
+          taskId,
+          actorType: "deepseek",
+          source: "execution_assistant",
+          toolName: "恢复代查前小手机界面",
+          capabilityId: "phone_management",
+          authorizationBasis: "user_view_read",
+          argumentKeys: [],
+        });
+        await finishDeviceOperation(operation.id, status === "succeeded"
+          ? { status, resultSummary: "已恢复代查前的应用、桌面页、文件夹与滚动位置" }
+          : { status, error: error instanceof Error ? error.message : String(error || "界面恢复失败") });
+      } catch (logError) {
+        console.warn("[ExecutionInspection] failed to record interface restoration", logError);
+      }
+    };
+
+    const restoreSnapshot = (snapshot: ExecutionInspectionSnapshot) => {
+      setCurrentPageIndex(snapshot.currentPageIndex);
+      setOpenFolderId(snapshot.openFolderId);
+      setFolderPageIndex(snapshot.folderPageIndex);
+      setEditMode(snapshot.editMode);
+      activeAppRef.current = snapshot.activeApp;
+      setActiveApp(snapshot.activeApp);
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          restorePhoneScrollOffsets(shellRef.current, snapshot.scrollOffsets);
+        });
+      });
+    };
+
+    const onStart = (event: Event) => {
+      const detail = (event as CustomEvent<ExecutionAssistantInspectionStart>).detail;
+      if (!detail?.taskId || executionInspectionSnapshotRef.current) return;
+      if (executionInspectionClearTimerRef.current !== null) {
+        window.clearTimeout(executionInspectionClearTimerRef.current);
+        executionInspectionClearTimerRef.current = null;
+      }
+      executionInspectionSnapshotRef.current = {
+        taskId: detail.taskId,
+        activeApp: activeAppRef.current,
+        currentPageIndex: currentPageIndexRef.current,
+        openFolderId: openFolderIdRef.current,
+        folderPageIndex: folderPageIndexRef.current,
+        editMode: editModeRef.current,
+        scrollOffsets: capturePhoneScrollOffsets(shellRef.current),
+      };
+      setExecutionInspection({
+        taskId: detail.taskId,
+        assistantName: detail.assistantName || "执行助理",
+        label: "正在准备本人小手机代查",
+      });
+      setOpenFolderId(null);
+      setEditMode(false);
+      if (activeAppRef.current === "checkphone") {
+        activeAppRef.current = null;
+        setActiveApp(null);
+      }
+    };
+
+    const onStep = (event: Event) => {
+      const detail = (event as CustomEvent<ExecutionAssistantInspectionStep>).detail;
+      const snapshot = executionInspectionSnapshotRef.current;
+      if (!detail?.taskId || snapshot?.taskId !== detail.taskId) return;
+      setExecutionInspection(previous => previous?.taskId === detail.taskId
+        ? { ...previous, label: detail.label, restoring: false }
+        : previous);
+      // checkphone 是角色手机入口；本人视角代查永远不能导航到这里。
+      if (!detail.targetApp || detail.targetApp === "checkphone") return;
+      setOpenFolderId(null);
+      setEditMode(false);
+      if (detail.targetApp === "resources") setResourcesInitialPage("main");
+      if (detail.targetApp === "chat") setChatInitSessionId(null);
+      activeAppRef.current = detail.targetApp;
+      setActiveApp(detail.targetApp);
+    };
+
+    const onEnd = (event: Event) => {
+      const detail = (event as CustomEvent<ExecutionAssistantInspectionEnd>).detail;
+      const snapshot = executionInspectionSnapshotRef.current;
+      if (!detail?.taskId || snapshot?.taskId !== detail.taskId) return;
+      const outcomeLabel = detail.outcome === "succeeded" ? "代查完成"
+        : detail.outcome === "cancelled" ? "代查已取消"
+          : "代查失败";
+      setExecutionInspection(previous => previous?.taskId === detail.taskId
+        ? { ...previous, label: `${outcomeLabel}，正在恢复原界面`, restoring: true }
+        : previous);
+      try {
+        restoreSnapshot(snapshot);
+        void recordRestore(detail.taskId, "succeeded");
+      } catch (error) {
+        void recordRestore(detail.taskId, "failed", error);
+      } finally {
+        executionInspectionSnapshotRef.current = null;
+        executionInspectionClearTimerRef.current = window.setTimeout(() => {
+          setExecutionInspection(previous => previous?.taskId === detail.taskId ? null : previous);
+          executionInspectionClearTimerRef.current = null;
+        }, 900);
+      }
+    };
+
+    window.addEventListener(EXECUTION_ASSISTANT_INSPECTION_START_EVENT, onStart);
+    window.addEventListener(EXECUTION_ASSISTANT_INSPECTION_STEP_EVENT, onStep);
+    window.addEventListener(EXECUTION_ASSISTANT_INSPECTION_END_EVENT, onEnd);
+    return () => {
+      window.removeEventListener(EXECUTION_ASSISTANT_INSPECTION_START_EVENT, onStart);
+      window.removeEventListener(EXECUTION_ASSISTANT_INSPECTION_STEP_EVENT, onStep);
+      window.removeEventListener(EXECUTION_ASSISTANT_INSPECTION_END_EVENT, onEnd);
+      if (executionInspectionClearTimerRef.current !== null) {
+        window.clearTimeout(executionInspectionClearTimerRef.current);
+        executionInspectionClearTimerRef.current = null;
+      }
+    };
+  }, []);
+
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail;
@@ -4223,6 +4393,22 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
               {notice ? (
                 <aside className="phone-shell-notice" role="status" aria-live="polite">
                   {notice}
+                </aside>
+              ) : null}
+
+              {executionInspection ? (
+                <aside
+                  className={`execution-assistant-inspection${executionInspection.restoring ? " is-restoring" : ""}`}
+                  role="status"
+                  aria-live="polite"
+                  data-task-id={executionInspection.taskId}
+                >
+                  <span className="execution-assistant-inspection-pulse" aria-hidden />
+                  <span>
+                    <strong>{executionInspection.assistantName}</strong>
+                    {executionInspection.label}
+                    <small>仅限本人视角授权范围</small>
+                  </span>
                 </aside>
               ) : null}
 

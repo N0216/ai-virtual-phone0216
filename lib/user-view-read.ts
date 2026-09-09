@@ -1,5 +1,18 @@
 export const USER_VIEW_READ_CAPABILITY_ID = "user_view_read";
 
+export function requiresControlledInteractionRead(input: {
+    sourceEngine?: string;
+    normalizedPath: string;
+    scansAllModules?: boolean;
+}): boolean {
+    if (input.sourceEngine !== "execution_assistant") return false;
+    return Boolean(
+        input.scansAllModules
+        || input.normalizedPath === "/chat"
+        || input.normalizedPath.startsWith("/chat/"),
+    );
+}
+
 export type UserViewReadCall = {
     name: string;
     args?: Record<string, unknown>;

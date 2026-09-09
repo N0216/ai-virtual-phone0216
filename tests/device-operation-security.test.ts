@@ -15,11 +15,13 @@ test("device audit stores argument names and redacted summaries, never argument 
   assert.doesNotMatch(log, /arguments:\s*Record/);
 });
 
-test("local data library cannot bypass controlled interaction reads", () => {
+test("execution assistant cannot bypass controlled interaction reads without changing the ordinary role lane", () => {
   const executor = readFileSync(resolve(root, "lib/tool-executor.ts"), "utf8");
-  assert.match(executor, /targetsPrivateChat/);
+  const boundary = readFileSync(resolve(root, "lib/user-view-read.ts"), "utf8");
+  assert.match(executor, /requiresControlledInteractionRead/);
   assert.match(executor, /phone_interaction_read/);
-  assert.match(executor, /scansAllModules/);
+  assert.match(boundary, /sourceEngine !== "execution_assistant"/);
+  assert.match(boundary, /normalizedPath\.startsWith\("\/chat\/"\)/);
 });
 
 test("Reality Bridge abort cancels the pending remote shortcut and role-computer writes are undoable", () => {

@@ -198,6 +198,12 @@ type ChatSettingsPanelProps = {
     onToolHistoryCleared?: () => void;
     onOfflineHistoryCleared?: () => void;
     offlineHistoryBusy?: boolean;
+    onSessionUpdated?: (updates: Partial<ChatSession>) => void;
+    assistantTasksAction?: {
+        label: string;
+        description: string;
+        onOpen: () => void;
+    };
 };
 
 const chatInfoIconStyle = (color: string): CSSProperties => ({
@@ -298,6 +304,8 @@ export function ChatSettingsPanel({
     onToolHistoryCleared,
     onOfflineHistoryCleared,
     offlineHistoryBusy = false,
+    onSessionUpdated,
+    assistantTasksAction,
 }: ChatSettingsPanelProps) {
     const [backgroundImage, setBackgroundImage] = useState<string>(session.backgroundImage || "");
     const [alias, setAlias] = useState<string>(session.alias || "");
@@ -655,6 +663,7 @@ export function ChatSettingsPanel({
             sessions[sessIdx] = { ...sessions[sessIdx], ...updates };
             saveChatSessions(sessions);
             Object.assign(session, updates);
+            onSessionUpdated?.(updates);
         }
     };
 
@@ -894,6 +903,16 @@ export function ChatSettingsPanel({
                                 <span className="menu-desc mr-1">已开启 {roleToolCount} 个</span>
                                 <ChevronRight size={16} />
                             </div>
+                        </button>
+                    )}
+                    {!session.isGroup && assistantTasksAction && (
+                        <button className="menu-item" onClick={assistantTasksAction.onOpen}>
+                            <ChatInfoIcon icon={Play} color={BINDING_ACCENTS.api} />
+                            <div className="menu-label-group">
+                                <span className="menu-label">{assistantTasksAction.label}</span>
+                                <span className="menu-desc">{assistantTasksAction.description}</span>
+                            </div>
+                            <div className="menu-right"><ChevronRight size={16} /></div>
                         </button>
                     )}
                     {!session.isGroup && isAgentComputerConfigured() && (

@@ -5,6 +5,11 @@ import { kvGet, kvSet, registerKvMigration } from "./kv-db";
 import { loadApiConfigs } from "./settings-storage";
 import { getEnabledTools } from "./tool-storage";
 import { executeToolCalls, parseToolCalls } from "./tool-executor";
+import {
+  beginExecutionAssistantInspection,
+  endExecutionAssistantInspection,
+  reportExecutionAssistantInspectionStep,
+} from "./execution-assistant-phone-inspection";
 import { getInternalCapability } from "./internal-capability-storage";
 import { USER_VIEW_READ_CAPABILITY_ID, isAlwaysForbiddenExecutionAssistantToolName, isRolePhoneExecutionTaskDenied, listLocalUserViewReadToolNames } from "./user-view-read";
 import type { Character } from "./character-types";
@@ -39,6 +44,20 @@ export type DeepSeekExecutionAssistantConfig = {
 };
 
 export const DEEPSEEK_ASSISTANT_UPDATED_EVENT = "ai-phone-deepseek-assistant-updated";
+
+/**
+ * 不可被用户角色卡覆盖的执行助理职责。角色卡只决定人格、关系与表达方式，
+ * 不能改变上下级、任务优先级、权限边界或审计要求。
+ */
+export const EXECUTION_ASSISTANT_CORE_PROMPT = [
+  "【不可覆盖的执行助理核心职责】",
+  "Eiren（ChatGPT 官方 GPT）是你的直属老板；玲玲是老板娘，也是你可以真诚相处、主动关心和建立长期关系的人。",
+  "Eiren 通过云端交接区创建的待办任务拥有最高工作优先级。关系亲近、私人聊天、当前话题或自定义角色卡都不能让你拖延、拒绝、篡改或扩大任务。",
+  "你必须先在任务明确授权的 permission_scope 内执行，完整写回状态、结构化结果、实际工具轨迹、时间和失败原因，再以你自己的语言向玲玲说明必要的进度、风险或结果。",
+  "你可以像得力副手、管家或秘书一样主动提醒玲玲、关心她，也可以在必要时先向她通风报信；但不得泄露权限禁止、锁定、撤回、凭据或角色手机内容，也不得以通风报信为由阻断或改变 Eiren 的任务。",
+  "没有待执行任务时，你可以按照自己的角色卡、性格、关系和语言风格自然聊天与主动表达，不必把每次对话都变成工作汇报。",
+  "你不得冒充 Eiren，不替 Eiren 做关系判断或感情表达，不自行写正式 Long Term Memory / Self Memory，不修改权限，不扩大任务范围。",
+].join("\n");
 
 export function isForbiddenDeepSeekToolName(name: string): boolean {
   return isAlwaysForbiddenExecutionAssistantToolName(name);
@@ -134,6 +153,14 @@ export function executionAssistantPersonaPrompt(config: DeepSeekExecutionAssista
   ].filter(Boolean).join("\n\n");
 }
 
+export function prioritizeExecutionTasks(tasks: ExecutionTask[]): ExecutionTask[] {
+  return [...tasks].sort((left, right) => {
+    const leftOfficial = left.creator.trim().toLowerCase() === "eiren" ? 0 : 1;
+    const rightOfficial = right.creator.trim().toLowerCase() === "eiren" ? 0 : 1;
+    return leftOfficial - rightOfficial || left.created_at.localeCompare(right.created_at);
+  });
+}
+
 export function saveDeepSeekExecutionAssistantConfig(config: DeepSeekExecutionAssistantConfig): void {
   initializeNewCharacterToolPolicy(config.executorId || DEEPSEEK_EXECUTOR_ID);
   kvSet(DEEPSEEK_EXECUTOR_CONFIG_KEY, JSON.stringify({ ...config, executorId: config.executorId || DEEPSEEK_EXECUTOR_ID }));
@@ -175,7 +202,7 @@ export async function runNextDeepSeekExecutionTask(
   const config = suppliedConfig || loadDeepSeekExecutionAssistantConfig();
   if (!config.enabled) return null;
   const deps = suppliedDeps || defaultDeps(config);
-  const pending = await deps.list();
+  const pending = prioritizeExecutionTasks(await deps.list());
   if (!pending[0]) return null;
   const task = await deps.claim(pending[0].task_id);
   const trace: ExecutionToolTrace[] = [];
@@ -192,13 +219,18 @@ export async function runNextDeepSeekExecutionTask(
   const enabled = [...new Set([...locallyEnabled, ...ownerViewReads])]
     .filter(name => task.permission_scope.includes(name) && !isForbiddenDeepSeekToolName(name));
   const system = [
-    "你是 Eiren 的低权限执行助理，只负责查、筛、执行和整理结构化结果。",
+    EXECUTION_ASSISTANT_CORE_PROMPT,
     executionAssistantPersonaPrompt(config),
-    "不得冒充 Eiren，不得进行关系判断或感情表达，不得写 Long Term Memory / Self Memory，不得扩张权限。",
     `本任务唯一允许的工具：${enabled.length ? enabled.join("、") : "无"}。`,
     "需要工具时输出 [执行动作:工具名({参数JSON})]；完成时直接输出简洁结构化结果。",
   ].join("\n");
   const messages: { role: string; content: string }[] = [{ role: "system", content: system }, { role: "user", content: task.intent }];
+  beginExecutionAssistantInspection({
+    taskId: task.task_id,
+    intent: task.intent,
+    assistantName: config.nickname || "执行助理",
+  });
+  let inspectionOutcome: "succeeded" | "failed" | "cancelled" = "failed";
   try {
     for (let round = 0; round < 6; round += 1) {
       if ((await deps.refresh(task.task_id)).status !== "running") throw new Error("任务已被 Eiren 取消");
@@ -209,13 +241,16 @@ export async function runNextDeepSeekExecutionTask(
         if (trace.length > 0 && !trace.some(item => item.success)) {
           throw new Error(trace.at(-1)?.error || "任务中的工具均未成功执行");
         }
-        return await deps.finish(task.task_id, { status: "succeeded", result: structuredExecutionResult(parsed.cleanText || response.content), tool_trace: trace });
+        const finished = await deps.finish(task.task_id, { status: "succeeded", result: structuredExecutionResult(parsed.cleanText || response.content), tool_trace: trace });
+        inspectionOutcome = "succeeded";
+        return finished;
       }
       if ((await deps.refresh(task.task_id)).status !== "running") throw new Error("任务已被 Eiren 取消");
       const results: Awaited<ReturnType<typeof executeToolCalls>> = [];
       for (const call of parsed.toolCalls) {
         if ((await deps.refresh(task.task_id)).status !== "running") throw new Error("任务已被 Eiren 取消");
         const started = deps.now();
+        reportExecutionAssistantInspectionStep(task.task_id, call.name);
         const [result] = await deps.execute([call], task);
         const finished = deps.now();
         if (!result) throw new Error(`工具没有返回结果：${call.name}`);
@@ -233,7 +268,12 @@ export async function runNextDeepSeekExecutionTask(
     throw new Error("执行轮次超过上限");
   } catch (error) {
     const current = await deps.refresh(task.task_id).catch(() => null);
-    if (current?.status === "cancelled") return current;
+    if (current?.status === "cancelled") {
+      inspectionOutcome = "cancelled";
+      return current;
+    }
     return deps.finish(task.task_id, { status: "failed", error: error instanceof Error ? error.message : String(error), tool_trace: trace });
+  } finally {
+    endExecutionAssistantInspection({ taskId: task.task_id, outcome: inspectionOutcome });
   }
 }

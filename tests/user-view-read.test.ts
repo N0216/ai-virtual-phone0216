@@ -12,6 +12,7 @@ import {
   isRolePhoneLocalDataPath,
   isRolePhoneReference,
   isRolePhoneUserViewReadCallDenied,
+  requiresControlledInteractionRead,
   resolveUserViewReadPermission,
   sanitizeUserViewReadResult,
 } from "../lib/user-view-read.ts";
@@ -41,6 +42,29 @@ test("ordinary reads need no second per-tool grant, but task scope is mandatory"
     resolveUserViewReadPermission({ call, grantEnabled: true, taskPermissionScope: ["查看小手机设置"] }).reason,
     "outside_task_scope",
   );
+});
+
+test("ordinary role phone-check and execution-assistant owner inspection use separate access lanes", () => {
+  for (const normalizedPath of ["/chat", "/chat/sessions", "/chat/messages"]) {
+    assert.equal(requiresControlledInteractionRead({
+      sourceEngine: "chat",
+      normalizedPath,
+    }), false, `ordinary role keeps its original limited phone-check lane: ${normalizedPath}`);
+    assert.equal(requiresControlledInteractionRead({
+      sourceEngine: "execution_assistant",
+      normalizedPath,
+    }), true, `execution assistant must use phone_interaction_read: ${normalizedPath}`);
+  }
+  assert.equal(requiresControlledInteractionRead({
+    sourceEngine: "chat",
+    normalizedPath: "/",
+    scansAllModules: true,
+  }), false);
+  assert.equal(requiresControlledInteractionRead({
+    sourceEngine: "execution_assistant",
+    normalizedPath: "/",
+    scansAllModules: true,
+  }), true);
 });
 
 test("write, delete, send, command and Reality actions never inherit user_view_read", () => {

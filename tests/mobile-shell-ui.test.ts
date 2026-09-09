@@ -61,12 +61,18 @@ test("built-in assistant preserves real voice and file attachments", () => {
 
 test("execution assistant uses the normal chat shell and exposes scoped handoff traces", () => {
   const room = read("components/chat/deepseek-assistant-chat-room.tsx");
+  const settings = read("components/chat/chat-settings-panel.tsx");
+  const messages = read("components/chat/chat-message-list.tsx");
   const archive = read("components/phone-character-app.tsx");
   assert.match(room, /runNextDeepSeekExecutionTask/);
   assert.match(room, /permission_scope/);
   assert.match(room, /task\.tool_trace/);
   assert.match(room, /Eiren → 执行助理任务区/);
-  assert.match(room, /CharArchiveView/);
+  assert.match(room, /<ChatSettingsPanel/);
+  assert.match(room, /assistantTasksAction=/);
+  assert.match(settings, /assistantTasksAction/);
+  assert.doesNotMatch(room, /function AssistantSettings/);
+  assert.match(messages, /avatarFit="cover"/);
   assert.match(room, /executionAssistantPersonaPrompt/);
   assert.match(room, /page-header-safe-area/);
   assert.match(room, /page-header-content/);
@@ -125,4 +131,15 @@ test("offline push repairs this device even when the local gate cache expired", 
   assert.match(registrar, /cached === null/);
   assert.match(registrar, /hasAccountPushSubscription\(\)/);
   assert.match(registrar, /ensurePersonalPushSubscription\(\)/);
+});
+
+test("execution assistant inspection is visible, scoped and restores the previous shell", () => {
+  const shell = read("components/desktop-shell.tsx");
+  const css = read("styles/phone-shell.css");
+  assert.match(shell, /execution-assistant-inspection/);
+  assert.match(shell, /仅限本人视角授权范围/);
+  assert.match(shell, /detail\.targetApp === "checkphone"/);
+  assert.match(shell, /restorePhoneScrollOffsets/);
+  assert.match(shell, /恢复代查前小手机界面/);
+  assert.match(css, /\.execution-assistant-inspection\s*\{/);
 });

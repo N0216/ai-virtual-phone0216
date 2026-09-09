@@ -5,14 +5,14 @@ import type { PointerEvent as ReactPointerEvent } from "react";
 import { ChevronLeft, FileUp, Image as ImageIcon, MoreHorizontal, Phone, Play, RefreshCw, Settings, Video, X } from "lucide-react";
 import { simpleLLMCall } from "@/lib/api-helpers";
 import { loadApiConfigs } from "@/lib/settings-storage";
-import { applyExecutionAssistantCharacter, executionAssistantCharacter, executionAssistantPersonaPrompt, loadDeepSeekExecutionAssistantConfig, runNextDeepSeekExecutionTask, saveDeepSeekExecutionAssistantConfig, type DeepSeekExecutionAssistantConfig } from "@/lib/deepseek-execution-assistant";
-import { CharArchiveView } from "@/components/phone-character-app";
+import { DEEPSEEK_EXECUTOR_ID, EXECUTION_ASSISTANT_CORE_PROMPT, executionAssistantPersonaPrompt, loadDeepSeekExecutionAssistantConfig, runNextDeepSeekExecutionTask, saveDeepSeekExecutionAssistantConfig, type DeepSeekExecutionAssistantConfig } from "@/lib/deepseek-execution-assistant";
 import { listExecutionTasks, type ExecutionTask, type ExecutionTaskStatus } from "@/lib/execution-handoff";
 import { kvGet, kvSet } from "@/lib/kv-db";
 import { startCallRecording, transcribeAudioBlob, resolveCloudSttConfig, type ActiveCallRecording } from "@/lib/stt-cloud";
-import { PageShell } from "@/components/ui/page-shell";
 import { EmojiPanel } from "./emoji-panel";
 import { resolveMascotImageRef } from "@/lib/mascot-settings";
+import { ChatSettingsPanel } from "./chat-settings-panel";
+import { createOrGetSession, loadChatSessions, saveChatSessions, upsertImportedChatMessage, type ChatSession } from "@/lib/chat-storage";
 
 type Attachment = { kind: "image" | "file" | "audio"; name: string; mimeType: string; size: number; dataUrl: string };
 type ChatItem = { id: string; role: "user" | "assistant"; text: string; createdAt: string; attachments?: Attachment[] };
@@ -22,48 +22,53 @@ function loadItems(): ChatItem[] { try { const value = JSON.parse(kvGet(KEY) || 
 function toDataUrl(blob: Blob): Promise<string> { return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onerror = reject; reader.onload = () => resolve(String(reader.result || "")); reader.readAsDataURL(blob); }); }
 function sizeLabel(size: number) { return size > 1048576 ? `${(size / 1048576).toFixed(1)}MB` : `${Math.max(1, Math.ceil(size / 1024))}KB`; }
 
-function AssistantSettings({ config, avatarPreview, items, onSave, onClose, onOpenTasks }: { config: DeepSeekExecutionAssistantConfig; avatarPreview?: string; items: ChatItem[]; onSave: (value: DeepSeekExecutionAssistantConfig) => void; onClose: () => void; onOpenTasks: () => void }) {
-  const apiConfigs = loadApiConfigs();
-  const [section, setSection] = useState<"main"|"profile"|"appearance"|"search"|"calls"|"call-settings">("main");
-  const [query, setQuery] = useState("");
-  const upload = async (file: File, field: "avatarImage" | "chatBackgroundImage" | "callBackgroundImage") => {
-    const { saveChatImageToIndexedDB } = await import("@/lib/chat-asset-storage");
-    const id = await saveChatImageToIndexedDB(file);
-    if (field !== "avatarImage") {
-      onSave({ ...config, [field]: id });
-      return;
+function ensureAssistantSession(config: DeepSeekExecutionAssistantConfig): ChatSession {
+  const session = createOrGetSession(config.executorId || DEEPSEEK_EXECUTOR_ID);
+  const updates: Partial<ChatSession> = {};
+  if (!session.alias && config.nickname) updates.alias = config.nickname;
+  if (!session.backgroundImage && config.chatBackgroundImage) updates.backgroundImage = config.chatBackgroundImage;
+  if (!session.videoBackground && config.callBackgroundImage) updates.videoBackground = config.callBackgroundImage;
+  if (!session.voiceBackground && config.callBackgroundImage) updates.voiceBackground = config.callBackgroundImage;
+  if (config.isPinned && !session.isPinned) updates.isPinned = true;
+  if (Object.keys(updates).length) {
+    Object.assign(session, updates);
+    const sessions = loadChatSessions();
+    const index = sessions.findIndex(item => item.id === session.id);
+    if (index >= 0) {
+      sessions[index] = { ...sessions[index], ...updates };
+      saveChatSessions(sessions);
     }
-    const dimensions = await new Promise<{ width: number; height: number }>(resolve => {
-      const image = new Image();
-      const url = URL.createObjectURL(file);
-      image.onload = () => { URL.revokeObjectURL(url); resolve({ width: image.naturalWidth, height: image.naturalHeight }); };
-      image.onerror = () => { URL.revokeObjectURL(url); resolve({ width: 1, height: 1 }); };
-      image.src = url;
+  }
+  return session;
+}
+
+function mirrorAssistantItemsToSession(items: ChatItem[], sessionId: string): void {
+  for (const [index, item] of items.entries()) {
+    const attachment = item.attachments?.[0];
+    upsertImportedChatMessage({
+      id: `deepseek-chat-${item.id}`,
+      sessionId,
+      role: item.role,
+      content: item.text,
+      status: "sent",
+      createdAt: item.createdAt,
+      order: index,
+      mediaType: attachment?.kind === "image" ? "image" : attachment?.kind === "audio" ? "audio" : attachment?.kind === "file" ? "media_file" : undefined,
+      mediaUrl: attachment?.dataUrl,
+      mediaData: attachment ? {
+        label: attachment.name,
+        fileName: attachment.name,
+        fileMimeType: attachment.mimeType,
+        fileSize: attachment.size,
+        fileType: attachment.kind,
+      } : undefined,
     });
-    const portrait = dimensions.height > dimensions.width * 1.2;
-    onSave({ ...config, avatarImage: id, avatarScale: portrait ? 1.45 : 1, avatarPositionY: portrait ? 30 : 50 });
-  };
-  if(section === "search") return <PageShell title="查找聊天记录" onBack={()=>setSection("main")} className="absolute inset-0 z-[120]"><div className="page-menu"><div className="menu-group"><div className="menu-item"><input autoFocus className="ui-input ui-input-inline" value={query} onChange={e=>setQuery(e.target.value)} placeholder="搜索聊天内容"/></div></div>{items.filter(item=>!query.trim()||item.text.toLowerCase().includes(query.trim().toLowerCase())).map(item=><div className="menu-group" key={item.id}><div className="menu-item !items-start"><div className="menu-label-group"><span className="menu-label">{item.role==="user"?"我":config.nickname||"执行助理"}</span><span className="menu-desc whitespace-pre-wrap">{item.text}</span></div></div></div>)}</div></PageShell>;
-  if(section === "calls") return <PageShell title="通话内容" onBack={()=>setSection("main")} className="absolute inset-0 z-[120]"><div className="ui-empty"><span className="menu-desc">暂无通话记录</span></div></PageShell>;
-  if(section === "call-settings") return <PageShell title="独立通话设置" onBack={()=>setSection("main")} className="absolute inset-0 z-[120]"><div className="page-menu"><div className="menu-group"><label className="menu-item"><span className="menu-label-group"><span className="menu-label">通话背景</span><span className="menu-desc">只应用于这个执行助理</span></span><span className="menu-right">选择图片</span><input hidden type="file" accept="image/*" onChange={e=>{const f=e.currentTarget.files?.[0];e.currentTarget.value="";if(f)void upload(f,"callBackgroundImage");}}/></label><button className="menu-item" onClick={()=>onSave({...config,callBackgroundImage:""})}><span className="menu-label text-[var(--c-danger)]">恢复默认通话背景</span></button></div></div></PageShell>;
-  if(section === "profile") return <div className="absolute inset-0 z-[120] bg-[var(--c-page-body-bg)]"><CharArchiveView char={executionAssistantCharacter(config)} avatarPreview={avatarPreview} isEditing isExisting onBack={()=>setSection("main")} onEdit={()=>undefined} onCancelEdit={()=>setSection("main")} onSave={(data)=>{onSave(applyExecutionAssistantCharacter(config,data));setSection("main");}} onDelete={()=>undefined} onExportJson={()=>undefined} onExportPng={async()=>undefined}/></div>;
-  if(section === "appearance") return <PageShell title="聊天外观与模型" onBack={()=>setSection("main")} className="absolute inset-0 z-[120]"><div className="page-menu"><div className="menu-group"><label className="menu-item"><span className="menu-label-group"><span className="menu-label">聊天背景</span><span className="menu-desc">只应用于这个执行助理的聊天</span></span><span className="menu-right">选择图片</span><input hidden type="file" accept="image/*" onChange={e=>{const f=e.currentTarget.files?.[0];e.currentTarget.value="";if(f)void upload(f,"chatBackgroundImage");}}/></label><label className="menu-item flex-col !items-stretch"><span className="menu-label">聊天与执行模型</span><span className="menu-desc">可选择任意已配置的模型服务，不绑定 DeepSeek</span><select className="ui-input" value={config.apiConfigId} onChange={e=>onSave({...config,apiConfigId:e.target.value})}><option value="">选择模型 API</option>{apiConfigs.map(api=><option key={api.id} value={api.id}>{api.name||api.provider} · {api.provider}</option>)}</select></label></div><div className="menu-group"><button className="menu-item" onClick={()=>onSave({...config,chatBackgroundImage:""})}><span className="menu-label text-[var(--c-danger)]">恢复默认聊天背景</span></button></div></div></PageShell>;
-  return <PageShell title="聊天信息" onBack={onClose} className="absolute inset-0 z-[120]">
-    <div className="page-menu chat-info-menu">
-      <div className="menu-group">
-        <button className="menu-item" onClick={()=>setSection("profile")}><span className="menu-label-group"><span className="menu-label">设置资料与角色档案</span><span className="menu-desc">头像、昵称、微信号、完整人设、性格、标签与时区</span></span><span className="menu-right">›</span></button>
-        <button className="menu-item" onClick={()=>setSection("appearance")}><span className="menu-label-group"><span className="menu-label">聊天外观与模型</span><span className="menu-desc">聊天背景与当前助理使用的模型</span></span><span className="menu-right">›</span></button>
-        <button className="menu-item" onClick={()=>setSection("search")}><span className="menu-label-group"><span className="menu-label">查找聊天记录</span><span className="menu-desc">查询与这个助理的历史消息</span></span><span className="menu-right">›</span></button>
-        <button className="menu-item" onClick={()=>setSection("calls")}><span className="menu-label-group"><span className="menu-label">通话内容</span><span className="menu-desc">独立查看语音与视频通话记录</span></span><span className="menu-right">›</span></button>
-        <button className="menu-item" onClick={()=>setSection("call-settings")}><span className="menu-label-group"><span className="menu-label">独立通话设置</span><span className="menu-desc">设置这个助理自己的通话界面</span></span><span className="menu-right">›</span></button>
-        <button className="menu-item" onClick={onOpenTasks}><span className="menu-label-group"><span className="menu-label">助理工具与任务</span><span className="menu-desc">任务交接、权限、执行结果与工具记录</span></span><span className="menu-right">›</span></button>
-      </div>
-    </div>
-  </PageShell>;
+  }
 }
 
 export function DeepSeekAssistantChatRoom({ onBack }: { onBack: () => void }) {
   const [config, setConfig] = useState(loadDeepSeekExecutionAssistantConfig);
+  const [assistantSession, setAssistantSession] = useState<ChatSession>(() => ensureAssistantSession(loadDeepSeekExecutionAssistantConfig()));
   const [items, setItems] = useState<ChatItem[]>(loadItems);
   const [text, setText] = useState("");
   const [thinking, setThinking] = useState(false);
@@ -86,12 +91,22 @@ export function DeepSeekAssistantChatRoom({ onBack }: { onBack: () => void }) {
   const startYRef = useRef(0);
   const scrollRef = useRef<HTMLDivElement|null>(null);
   const api = useMemo(() => loadApiConfigs().find(item => item.id === config.apiConfigId), [config.apiConfigId]);
-  const publish = useCallback((next: ChatItem[]) => { setItems(next); kvSet(KEY, JSON.stringify(next.slice(-200))); }, []);
+  const publish = useCallback((next: ChatItem[]) => { setItems(next); kvSet(KEY, JSON.stringify(next.slice(-200))); mirrorAssistantItemsToSession(next, assistantSession.id); }, [assistantSession.id]);
+  useEffect(() => { mirrorAssistantItemsToSession(items, assistantSession.id); }, [assistantSession.id]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" }); }, [items, thinking]);
   useEffect(() => { let live=true; void resolveMascotImageRef(config.avatarImage," ").then(value=>{if(live)setAvatarUrl(value.trim());}); return()=>{live=false;}; }, [config.avatarImage]);
   useEffect(() => { let live=true; void resolveMascotImageRef(config.chatBackgroundImage,"").then(value=>{if(live)setBackgroundUrl(value);}); return()=>{live=false;}; }, [config.chatBackgroundImage]);
   useEffect(() => { let live=true; void resolveMascotImageRef(config.callBackgroundImage,"").then(value=>{if(live)setCallBackgroundUrl(value);}); return()=>{live=false;}; }, [config.callBackgroundImage]);
   const saveConfig = (next: DeepSeekExecutionAssistantConfig) => { setConfig(next); saveDeepSeekExecutionAssistantConfig(next); };
+  const handleSessionUpdated = (updates: Partial<ChatSession>) => {
+    setAssistantSession(current => ({ ...current, ...updates }));
+    const configUpdates: Partial<DeepSeekExecutionAssistantConfig> = {};
+    if ("isPinned" in updates) configUpdates.isPinned = updates.isPinned;
+    if ("backgroundImage" in updates) configUpdates.chatBackgroundImage = updates.backgroundImage || "";
+    if ("videoBackground" in updates) configUpdates.callBackgroundImage = updates.videoBackground || "";
+    if ("voiceBackground" in updates) configUpdates.callBackgroundImage = updates.voiceBackground || "";
+    if (Object.keys(configUpdates).length) saveConfig({ ...config, ...configUpdates });
+  };
 
   const refreshTasks = async () => { setTaskError(""); try { const statuses: ExecutionTaskStatus[]=["pending","running","succeeded","failed","cancelled"]; const groups=await Promise.all(statuses.map(status=>listExecutionTasks(status))); setTasks(groups.flat().sort((a,b)=>b.created_at.localeCompare(a.created_at)).slice(0,30)); } catch(error){setTaskError(error instanceof Error?error.message:String(error));} };
   useEffect(() => { if(showTasks) void refreshTasks(); }, [showTasks]);
@@ -105,7 +120,7 @@ export function DeepSeekAssistantChatRoom({ onBack }: { onBack: () => void }) {
     const next=[...items,user]; publish(next); setText(""); setPending([]); setShowPlus(false); setShowEmoji(false);
     if(!api){publish([...next,{id:crypto.randomUUID(),role:"assistant",text:"还没有绑定模型 API，请到执行助理设置中选择一个现有 API 配置。",createdAt:new Date().toISOString()}]);return;}
     setThinking(true);
-    try { const response=await simpleLLMCall(api,[{role:"system",content:[`你的固定身份是${config.nickname||"执行助理"}，是拥有独立人格的副手、管家或秘书，同时承担低权限执行职责。不得冒充 Eiren/Daddy，不替他们做关系判断或感情表达，不写正式长期记忆，不绕过权限。`,executionAssistantPersonaPrompt(config),"没有任务时也要像完整角色一样自然聊天、表达自己的看法和性格。附件会以方括号说明；无法读取内容时必须诚实说明。"].filter(Boolean).join("\n\n")},...next.slice(-30).map(item=>({role:item.role,content:item.text}))],{temperature:.65,max_tokens:1200,usageCategory:"tool",usageLabel:"执行助理聊天"}); publish([...next,{id:crypto.randomUUID(),role:"assistant",text:response.content||response.error||"没有收到回复。",createdAt:new Date().toISOString()}]); } catch(error){publish([...next,{id:crypto.randomUUID(),role:"assistant",text:`执行失败：${error instanceof Error?error.message:String(error)}`,createdAt:new Date().toISOString()}]);} finally{setThinking(false);}
+    try { const response=await simpleLLMCall(api,[{role:"system",content:[EXECUTION_ASSISTANT_CORE_PROMPT,`你当前使用的名字是${config.nickname||"执行助理"}。`,executionAssistantPersonaPrompt(config),"附件会以方括号说明；无法读取内容时必须诚实说明。"].filter(Boolean).join("\n\n")},...next.slice(-30).map(item=>({role:item.role,content:item.text}))],{temperature:.65,max_tokens:1200,usageCategory:"tool",usageLabel:"执行助理聊天"}); publish([...next,{id:crypto.randomUUID(),role:"assistant",text:response.content||response.error||"没有收到回复。",createdAt:new Date().toISOString()}]); } catch(error){publish([...next,{id:crypto.randomUUID(),role:"assistant",text:`执行失败：${error instanceof Error?error.message:String(error)}`,createdAt:new Date().toISOString()}]);} finally{setThinking(false);}
   },[api,config.nickname,config.persona,config.personaPrompt,config.personality,config.briefPersona,items,pending,publish,text,thinking]);
 
   const pickFiles=async(files:File[],kind:"image"|"file")=>{const next:Attachment[]=[];for(const file of files.slice(0,8)){if(file.size>12*1024*1024)continue;next.push({kind,name:file.name,mimeType:file.type||"application/octet-stream",size:file.size,dataUrl:await toDataUrl(file)});}setPending(old=>[...old,...next].slice(0,8));};
@@ -120,7 +135,27 @@ export function DeepSeekAssistantChatRoom({ onBack }: { onBack: () => void }) {
     <div ref={scrollRef} className="page-body chat-room-main-pane flex flex-col gap-4 chat-scroll-anchored">{!items.length&&<div className="chat-sys-msg mx-auto">执行助理已就位。聊天不会扩大任何工具权限。</div>}{items.map(item=><div key={item.id} className="chat-msg-wrapper" data-role={item.role}>{item.role==="assistant"&&<div className="chat-msg-avatar grid h-10 w-10 shrink-0 place-items-center overflow-hidden rounded-full bg-[#2f6bff] font-bold text-white [&>img]:h-full [&>img]:w-full [&>img]:object-cover">{avatar}</div>}<div className={item.role==="user"?"chat-bubble-role-user rounded-md":"chat-bubble-role-assistant rounded-md"}>{item.attachments?.map((a,i)=>a.kind==="image"?<img key={i} src={a.dataUrl} alt={a.name} className="mb-2 max-h-64 rounded-lg object-contain"/>:a.kind==="audio"?<audio key={i} controls src={a.dataUrl}/>:<a key={i} href={a.dataUrl} download={a.name} className="mb-2 block underline">📎 {a.name} · {sizeLabel(a.size)}</a>)}{item.text}</div></div>)}</div>
     <div className="chat-input-bar chat-room-main-pane flex flex-col">{pending.length>0&&<div className="mascot-pending-files">{pending.map((a,i)=><span key={i}>{a.kind==="image"?"图片":a.name}<button onClick={()=>setPending(p=>p.filter((_,x)=>x!==i))}>×</button></span>)}</div>}<div className="chat-composer-row"><button type="button" className="ui-bare-btn chat-composer-action text-[var(--c-text)]" onClick={()=>{setVoiceMode(v=>!v);setShowEmoji(false);setShowPlus(false);}} aria-label="语音输入"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8.5 13.5v-3M11 15.5v-7M13.5 14v-4M16 12.8v-1.6"/></svg></button>{voiceMode?voiceButton:<textarea className="chat-input-textarea" rows={1} value={text} onChange={e=>setText(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();void send();}}} placeholder={`跟${config.nickname||"执行助理"}聊聊…`}/>}<button type="button" className="ui-bare-btn chat-composer-action text-[var(--c-text)]" onClick={()=>{setShowEmoji(v=>!v);setShowPlus(false);}} aria-label="表情"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg></button>{text.trim()||pending.length?<button className="chat-composer-send-button" onClick={()=>void send()} disabled={thinking}>发送</button>:<button type="button" className="ui-bare-btn chat-composer-action text-[var(--c-text)]" onClick={()=>{setShowPlus(v=>!v);setShowEmoji(false);}} aria-label="更多功能"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg></button>}</div>
       {showPlus&&<div className="chat-plus-menu mascot-plus-menu"><label className="chat-plus-menu-item"><span className="chat-plus-icon-box"><ImageIcon size={24}/></span><span>照片</span><input hidden type="file" accept="image/*" multiple onChange={e=>{void pickFiles(Array.from(e.currentTarget.files||[]),"image");e.currentTarget.value="";}}/></label><label className="chat-plus-menu-item"><span className="chat-plus-icon-box"><FileUp size={24}/></span><span>文件</span><input hidden type="file" multiple onChange={e=>{void pickFiles(Array.from(e.currentTarget.files||[]),"file");e.currentTarget.value="";}}/></label><button className="chat-plus-menu-item" onClick={()=>setCallMode("voice")}><span className="chat-plus-icon-box"><Phone size={24}/></span><span>语音通话</span></button><button className="chat-plus-menu-item" onClick={()=>setCallMode("video")}><span className="chat-plus-icon-box"><Video size={24}/></span><span>视频通话</span></button><button className="chat-plus-menu-item" onClick={()=>setShowTasks(true)}><span className="chat-plus-icon-box"><Play size={24}/></span><span>任务交接</span></button><button className="chat-plus-menu-item" onClick={()=>setShowSettings(true)}><span className="chat-plus-icon-box"><Settings size={24}/></span><span>聊天设置</span></button></div>}{showEmoji&&<EmojiPanel onSelect={emoji=>setText(t=>t+emoji)}/>}</div>
-    {showSettings&&<AssistantSettings config={config} avatarPreview={avatarUrl} items={items} onSave={saveConfig} onClose={()=>setShowSettings(false)} onOpenTasks={()=>{setShowSettings(false);setShowTasks(true);}}/>}
+    {showSettings && (
+      <ChatSettingsPanel
+        session={assistantSession}
+        onClose={() => setShowSettings(false)}
+        onSessionUpdated={handleSessionUpdated}
+        onDeleteFriend={() => {
+          const next = { ...config, contactAdded: false };
+          saveConfig(next);
+          setShowSettings(false);
+          onBack();
+        }}
+        assistantTasksAction={{
+          label: "助理工具与任务",
+          description: "任务交接、权限、执行结果与工具记录",
+          onOpen: () => {
+            setShowSettings(false);
+            setShowTasks(true);
+          },
+        }}
+      />
+    )}
     {showTasks&&<div className="modal-overlay deepseek-task-overlay" role="dialog" aria-modal="true" aria-label="执行任务交接区"><section className="deepseek-task-sheet"><header><div><strong>Eiren → 执行助理任务区</strong><p>只执行任务明确授权的范围，实际工具仍逐项留痕。</p></div><button onClick={()=>setShowTasks(false)} aria-label="关闭"><X size={21}/></button></header><div className="deepseek-task-actions"><button onClick={()=>void refreshTasks()} disabled={taskBusy}><RefreshCw size={17}/>刷新</button><button className="primary" onClick={()=>void runNextTask()} disabled={taskBusy}><Play size={17}/>{taskBusy?"执行中…":"领取下一项"}</button></div>{taskError&&<div className="deepseek-task-error">{taskError}</div>}<div className="deepseek-task-list">{!tasks.length&&!taskError&&<div className="deepseek-task-empty">暂无任务记录</div>}{tasks.map(task=><article key={task.task_id} className="deepseek-task-card"><div className="deepseek-task-card-title"><span>{task.intent}</span><em data-status={task.status}>{task.status}</em></div><small>{task.task_id} · 创建者 {task.creator}</small><div className="deepseek-task-scope">范围：{task.permission_scope.length?task.permission_scope.join("、"):"无工具权限"}</div>{task.result!=null&&<pre>{typeof task.result==="string"?task.result:JSON.stringify(task.result,null,2)}</pre>}{task.error&&<div className="deepseek-task-error">{task.error}</div>}{task.tool_trace.length>0&&<details><summary>工具记录（{task.tool_trace.length}）</summary>{task.tool_trace.map((trace,index)=><div key={`${trace.tool}-${index}`} className="deepseek-tool-trace"><b>{trace.success?"✓":"×"} {trace.tool}</b><span>{trace.summary||trace.error||"已记录"}</span><small>{trace.started_at} → {trace.finished_at}</small></div>)}</details>}</article>)}</div></section></div>}
   </div>;
 }
